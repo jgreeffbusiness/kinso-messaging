@@ -1,0 +1,86 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  String    @id @default(cuid())
+  authId              String    @unique  // Generic external auth ID
+  authProvider        String?   // "firebase", "auth0", etc.
+  email               String?
+  name                String?
+  photoUrl            String?
+  googleAccessToken   String?
+  googleTokenExpiry   DateTime?
+  googleIntegrations  Json?    
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  contacts            Contact[]
+  messages            Message[]
+  contactEmails       ContactEmail[]
+}
+
+model Contact {
+  id                String   @id @default(cuid())
+  user              User     @relation(fields: [userId], references: [id])
+  userId            String
+  fullName          String
+  email             String?
+  phoneNumber       String?
+  photoUrl          String?
+  googleContactId   String?   @unique
+  messages          Message[]
+  googleId          String?   @unique
+  phone             String?
+  source            String?   // "google", "manual", etc.
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  emails            ContactEmail[]
+}
+
+model Message {
+  id         String    @id @default(cuid())
+  user       User      @relation(fields: [userId], references: [id])
+  userId     String
+  contact    Contact   @relation(fields: [contactId], references: [id])
+  contactId  String
+  platform   String
+  timestamp  DateTime
+  content    String
+  summary    Summary?
+}
+
+model Summary {
+  id          String   @id @default(cuid())
+  messageId   String   @unique
+  summaryText String
+  actionJson  Json
+  message     Message  @relation(fields: [messageId], references: [id])
+}
+
+model ContactEmail {
+  id         String   @id @default(cuid())
+  userId     String
+  contactId  String
+  messageId  String   @unique
+  threadId   String
+  createdAt  DateTime @default(now())
+  
+  // Relations
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([contactId])
+  @@index([messageId])
+}
