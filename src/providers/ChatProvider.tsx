@@ -1,70 +1,56 @@
 'use client'
 
-import { createContext, useContext, useState, ReactNode, useEffect } from 'react'
+import { createContext, useContext, useState, ReactNode } from 'react'
+
+type Message = {
+  id: number
+  content: string
+  sender: 'user' | 'assistant'
+  createdAt: string
+}
 
 type ChatContextType = {
-  isGlobalChatVisible: boolean
-  showGlobalChat: () => void
-  hideGlobalChat: () => void
-  toggleGlobalChat: () => void
   inputValue: string
   setInputValue: (value: string) => void
-  messages: any[] // Type this properly based on your needs
-  addMessage: (message: any) => void
-  isRightPanelVisible: boolean
-  setIsRightPanelVisible: (value: boolean) => void
+  messages: Message[]
+  addMessage: (message: Omit<Message, 'id'>) => void
+  // No open/close methods needed
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined)
 
 export function ChatProvider({ children }: { children: ReactNode }) {
-  const [isGlobalChatVisible, setIsGlobalChatVisible] = useState(false)
-  const [isRightPanelVisible, setIsRightPanelVisible] = useState(false)
   const [inputValue, setInputValue] = useState('')
-  const [messages, setMessages] = useState<any[]>([
+  const [messages, setMessages] = useState<Message[]>([
     {
       id: 1,
-      content: "How can I help you with your contacts today?",
+      content: "How can I help you today?",
       sender: "assistant",
       createdAt: new Date().toISOString()
     }
   ])
-
-  // If RightPanel becomes visible, hide the global chat
-  useEffect(() => {
-    if (isRightPanelVisible) {
-      setIsGlobalChatVisible(false)
-    }
-  }, [isRightPanelVisible])
-
-  const showGlobalChat = () => {
-    setIsGlobalChatVisible(true)
-  }
   
-  const hideGlobalChat = () => {
-    setIsGlobalChatVisible(false)
-  }
-  
-  const toggleGlobalChat = () => {
-    setIsGlobalChatVisible(prev => !prev)
-  }
-  
-  const addMessage = (message: any) => {
+  const addMessage = (message: Omit<Message, 'id'>) => {
     setMessages(prev => [...prev, { ...message, id: Date.now() }])
+    
+    // Later you can add actual AI integration here:
+    // if (message.sender === 'user') {
+    //   fetchAIResponse(message.content).then(response => {
+    //     addMessage({
+    //       content: response,
+    //       sender: 'assistant',
+    //       createdAt: new Date().toISOString()
+    //     })
+    //   })
+    // }
   }
 
   return (
     <ChatContext.Provider value={{
-      isGlobalChatVisible,
-      showGlobalChat,
-      hideGlobalChat,
-      toggleGlobalChat,
       inputValue,
       setInputValue,
       messages,
-      addMessage,
-      isRightPanelVisible,
-      setIsRightPanelVisible
+      addMessage
     }}>
       {children}
     </ChatContext.Provider>

@@ -1,24 +1,15 @@
 'use client'
 
-import { ReactNode, useState } from 'react'
+import { ReactNode } from 'react'
 import { Sidebar } from '../Sidebar'
 import { Header } from './Header'
 import { RightPanel } from './RightPanel'
-import { useRightPanel } from '@/providers/RightPanelProvider'
-import { GlobalChat } from '@/components/GlobalChat'
 
 export default function SharedLayout({ 
-  children,
-  showContactPanel = false,
-  contactData = null
+  children 
 }: { 
-  children: ReactNode,
-  showContactPanel?: boolean,
-  contactData?: any
+  children: ReactNode
 }) {
-
-  const { content } = useRightPanel()
-  
   return (
     <div className="flex h-screen w-full overflow-hidden">
       {/* Left nav bar */}
@@ -32,13 +23,8 @@ export default function SharedLayout({
             {children}
           </main>
           
-          {/* Always-visible right panel */}
-          <RightPanel
-            showContactInfo={showContactPanel || !!content?.props?.contact}
-            contactData={contactData || content?.props}
-          />
-
-          <GlobalChat />
+          {/* AI Assistant panel */}
+          <RightPanel />
         </div>
       </div>
     </div>

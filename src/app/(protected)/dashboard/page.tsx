@@ -1,6 +1,6 @@
 'use client'
 
-import SharedLayout from '@/components/layout/SharedLayout'
+import SharedLayout from '@components/layout/SharedLayout'
 
 export default function DashboardPage() {
   return (

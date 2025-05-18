@@ -1,8 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { Button } from '@/components/ui/button'
-import { GoogleIntegrationDialog } from '@/components/GoogleIntegrationDialog'
+import { Button } from '@components/ui/button'
+import { GoogleIntegrationDialog } from '@components/GoogleIntegrationDialog'
 
 export default function SettingsPage() {
   const [showIntegrationDialog, setShowIntegrationDialog] = useState(false)

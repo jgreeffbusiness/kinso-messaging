@@ -2,8 +2,8 @@
 
 import { useState, useEffect } from 'react'
 import { GoogleAuthProvider, signInWithPopup } from 'firebase/auth'
-import { auth } from '@/lib/firebase'
-import { useAuthStore } from '@/store/useAuthStore'
+import { auth } from '@lib/firebase'
+import { useAuthStore } from '@store/useAuthStore'
 import {
   Dialog,
   DialogContent,
@@ -11,11 +11,11 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
-import { Label } from '@/components/ui/label'
-import { Icons } from '@/components/ui/icons'
+} from '@components/ui/dialog'
+import { Button } from '@components/ui/button'
+import { Checkbox } from '@components/ui/checkbox'
+import { Label } from '@components/ui/label'
+import { Icons } from '@components/ui/icons'
 import { AlertCircle } from 'lucide-react'
 
 interface GoogleIntegrationDialogProps {

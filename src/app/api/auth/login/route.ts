@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
-import '@/lib/firebase-admin'
-import { adminAuth } from '@/lib/firebase-admin'
-import { prisma } from '@/server/db'
+import '@lib/firebase-admin'
+import { adminAuth } from '@lib/firebase-admin'
+import { prisma } from '@server/db'
 import { sign } from 'jsonwebtoken'
 
 // JWT secret should be in env vars

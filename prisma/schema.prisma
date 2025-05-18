@@ -28,6 +28,7 @@ model User {
   contacts            Contact[]
   messages            Message[]
   contactEmails       ContactEmail[]
+  notes               Note[]
 }
 
 model Contact {
@@ -46,6 +47,7 @@ model Contact {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
   emails            ContactEmail[]
+  notes             Note[]
 }
 
 model Message {
@@ -83,4 +85,20 @@ model ContactEmail {
   @@index([userId])
   @@index([contactId])
   @@index([messageId])
+}
+
+model Note {
+  id          String    @id @default(cuid())
+  content     String
+  contactId   String
+  userId      String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  // Relations
+  contact     Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([contactId])
+  @@index([userId])
 }

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react';
-import { useAuthStore } from '@/store/useAuthStore';
+import { useAuthStore } from '@store/useAuthStore';
 
 export function useGoogleContacts() {
   const [isLoading, setIsLoading] = useState(false);

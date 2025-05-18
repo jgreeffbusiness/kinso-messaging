@@ -1,8 +1,8 @@
 'use client'
 
 import { useEffect } from 'react'
-import { useAuthStore } from '@/store/useAuthStore'
-import { auth } from '@/lib/firebase'
+import { useAuthStore } from '@store/useAuthStore'
+import { auth } from '@lib/firebase'
 import { onAuthStateChanged } from 'firebase/auth'
 
 export function UserSessionProvider({ children }: { children: React.ReactNode }) {

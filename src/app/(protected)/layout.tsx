@@ -1,12 +1,12 @@
 'use client'
 
-import { useAuth } from '@/hooks/useAuth'
+import { useAuth } from '@hooks/useAuth'
 import { useRouter } from 'next/navigation'
 import { useEffect } from 'react'
-import { Spinner } from '@/components/ui/Spinner'
-import { RightPanelProvider } from '@/providers/RightPanelProvider'
-import { ContactPanel } from '@/components/panels/ContactPanel'
-import { Toaster } from '@/components/ui/sonner'
+import { Spinner } from '@components/ui/Spinner'
+import { RightPanelProvider } from '@providers/RightPanelProvider'
+import { ContactPanel } from '@components/panels/ContactPanel'
+import { Toaster } from '@components/ui/sonner'
 
 interface ProtectedLayoutProps {
   children: React.ReactNode

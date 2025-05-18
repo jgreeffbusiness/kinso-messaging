@@ -2,11 +2,11 @@
 
 import { useState } from 'react'
 import { Bell, Menu, Search } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet'
-import { Sidebar } from '@/components/Sidebar'
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
+import { Button } from '@components/ui/button'
+import { Input } from '@components/ui/input'
+import { Sheet, SheetContent, SheetTrigger } from '@components/ui/sheet'
+import { Sidebar } from '@components/Sidebar'
+import { Avatar, AvatarFallback, AvatarImage } from '@components/ui/avatar'
 
 export function Header() {
   const [showSearch, setShowSearch] = useState(false)

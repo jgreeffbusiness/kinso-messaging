@@ -1,5 +1,5 @@
 // src/server/trpc/context.ts
-import { prisma } from '@/server/db'
+import { prisma } from '@server/db'
 import { cookies } from 'next/headers'
 import { verify } from 'jsonwebtoken'
 

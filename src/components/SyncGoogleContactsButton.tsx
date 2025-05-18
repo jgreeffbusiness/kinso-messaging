@@ -1,11 +1,11 @@
 'use client'
 
 import { useState } from 'react'
-import { Button } from '@/components/ui/button'
-import { useGoogleContacts } from '@/hooks/useGoogleContacts'
-import { GoogleIntegrationDialog } from '@/components/GoogleIntegrationDialog'
+import { Button } from '@components/ui/button'
+import { useGoogleContacts } from '@hooks/useGoogleContacts'
+import { GoogleIntegrationDialog } from '@components/GoogleIntegrationDialog'
 import { RefreshCw, AlertCircle } from 'lucide-react'
-import { ContactImportModal } from '@/components/ContactImportModal'
+import { ContactImportModal } from '@components/ContactImportModal'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -14,8 +14,8 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import { useContacts } from '@/hooks/useContacts'
+} from '@components/ui/alert-dialog'
+import { useContacts } from '@hooks/useContacts'
 
 export default function SyncGoogleContactsButton() {
   const [isSyncing, setIsSyncing] = useState(false)
@@ -62,9 +62,9 @@ export default function SyncGoogleContactsButton() {
         variant="outline"
         className="gap-2"
       >
-          <RefreshCw className="h-4 w-4" />
-          Sync with Google
-        </Button>
+        <RefreshCw className="h-4 w-4" />
+        Sync with Google
+      </Button>
       
       {/* Integration Dialog */}
       <GoogleIntegrationDialog 

@@ -1,8 +1,8 @@
 'use client'
 
-import { auth } from '@/lib/firebase'
+import { auth } from '@lib/firebase'
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth'
-import { useAuthStore } from '@/store/useAuthStore'
+import { useAuthStore } from '@store/useAuthStore'
 
 export async function loginWithGoogle() {
   try {

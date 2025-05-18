@@ -9,6 +9,36 @@ export const contactRouter = createTRPCRouter({
     })
   }),
 
+  getById: protectedProcedure
+    .input(z.object({ id: z.string() }))
+    .query(async ({ ctx, input }) => {
+      // Get the contact with messages and notes
+      const contact = await ctx.prisma.contact.findUnique({
+        where: { 
+          id: input.id,
+          userId: ctx.user.id
+        },
+        include: {
+          messages: {
+            orderBy: { timestamp: 'desc' },
+            include: {
+              summary: true
+            }
+          },
+          notes: {
+            orderBy: { createdAt: 'desc' }
+          },
+          emails: true
+        }
+      })
+      
+      if (!contact) {
+        throw new Error('Contact not found')
+      }
+      
+      return contact;
+    }),
+
   bulkImport: protectedProcedure
     .input(z.array(z.object({
       fullName: z.string(),

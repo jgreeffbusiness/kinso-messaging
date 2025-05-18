@@ -1,21 +1,21 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useGoogleContacts } from '@/hooks/useGoogleContacts'
+import { useGoogleContacts } from '@hooks/useGoogleContacts'
 import { 
   Dialog, 
   DialogContent, 
   DialogHeader, 
   DialogTitle,
   DialogFooter
-} from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Icons } from '@/components/ui/icons'
-import { GoogleIntegrationDialog } from '@/components/GoogleIntegrationDialog'
+} from '@components/ui/dialog'
+import { Button } from '@components/ui/button'
+import { Input } from '@components/ui/input'
+import { Icons } from '@components/ui/icons'
+import { GoogleIntegrationDialog } from '@components/GoogleIntegrationDialog'
 import { Check, Search, RefreshCw } from 'lucide-react'
-import { Checkbox } from '@/components/ui/checkbox'
-import { ScrollArea } from '@/components/ui/scroll-area'
+import { Checkbox } from '@components/ui/checkbox'
+import { ScrollArea } from '@components/ui/scroll-area'
 import { toast } from 'sonner'
 import Image from 'next/image'
 

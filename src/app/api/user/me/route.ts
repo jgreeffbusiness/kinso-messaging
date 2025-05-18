@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import { verify } from 'jsonwebtoken'
-import { prisma } from '@/server/db'
+import { prisma } from '@server/db'
 
 // JWT secret should be in env vars
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'

@@ -2,8 +2,8 @@
 
 import { createContext, useContext, useEffect } from 'react'
 import { onAuthStateChanged } from 'firebase/auth'
-import { auth } from '@/lib/firebase'
-import { useAuthStore, User } from '@/store/useAuthStore'
+import { auth } from '@lib/firebase'
+import { useAuthStore, User } from '@store/useAuthStore'
 
 export const AuthContext = createContext<{
   user: User | null

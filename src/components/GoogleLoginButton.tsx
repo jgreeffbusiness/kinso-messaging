@@ -1,7 +1,7 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
-import { loginWithGoogle } from '@/hooks/useFirebaseLogin'
+import { loginWithGoogle } from '@hooks/useFirebaseLogin'
 
 export default function GoogleLoginButton() {
   const router = useRouter()
