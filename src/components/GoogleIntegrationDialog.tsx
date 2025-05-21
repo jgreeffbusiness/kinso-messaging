@@ -1,8 +1,7 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { GoogleAuthProvider, signInWithPopup } from 'firebase/auth'
-import { auth } from '@lib/firebase'
+import { useState } from 'react'
+import { GoogleAuthProvider, signInWithPopup, getAuth } from 'firebase/auth'
 import { useAuthStore } from '@store/useAuthStore'
 import {
   Dialog,
@@ -81,35 +80,57 @@ export function GoogleIntegrationDialog({
     setError(null)
     
     try {
-      let token = user?.googleAccessToken
+      const auth = getAuth()
+      const provider = new GoogleAuthProvider()
       
-      // Only show Google popup if we don't have a valid token
-      if (!hasValidGoogleToken()) {
-        // Create provider with scopes
-        const provider = new GoogleAuthProvider()
-        
-        // Add required scopes
-        getRequiredScopes().forEach(scope => {
-          provider.addScope(scope)
-        })
-        
-        // Request token with scopes
-        const result = await signInWithPopup(auth, provider)
-        const credential = GoogleAuthProvider.credentialFromResult(result)
-        token = credential?.accessToken
-        
-        if (!token) {
-          throw new Error("Failed to get Google access token")
-        }
+      // Add required scopes
+      getRequiredScopes().forEach(scope => {
+        provider.addScope(scope)
+      })
+      
+      // IMPORTANT: These parameters are required for refresh token
+      provider.setCustomParameters({
+        access_type: 'offline',  // Request a refresh token
+        prompt: 'consent'        // Force the consent screen to appear
+      })
+      
+      const result = await signInWithPopup(auth, provider)
+      
+      // After Firebase auth completes, extract the correct tokens:
+      const credential = GoogleAuthProvider.credentialFromResult(result)
+      if (!credential) {
+        throw new Error('Failed to get credentials from Google')
+      }
+
+      // We need the OAuth access token - not the Firebase ID token
+      const accessToken = result._tokenResponse.oauthAccessToken 
+
+      // This is the OAuth refresh token we need to save
+      const refreshToken = result._tokenResponse.refreshToken
+      
+      console.log('Auth result:', result)
+      console.log('Refresh token:', refreshToken)
+      
+      // After Firebase auth completes:
+      console.log('Complete auth result:', JSON.stringify(result, null, 2))
+
+      // Specifically check for the refresh token
+      console.log('Token response:', result._tokenResponse)
+      console.log('Refresh token exists:', !!result._tokenResponse?.refresh_token)
+      
+      if (!accessToken) {
+        throw new Error('Failed to get access token')
       }
       
-      // Save selected integrations and token (if new)
+      // Save tokens to your backend
       const response = await fetch('/api/auth/save-google-integrations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          token,  // This could be the existing token if already valid
-          integrations
+        body: JSON.stringify({
+          token: accessToken,
+          refreshToken: refreshToken,
+          integrations: integrations,
+          expiryTime: new Date(Date.now() + 3600 * 1000) // typically 1 hour
         })
       })
       

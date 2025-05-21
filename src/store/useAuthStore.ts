@@ -9,6 +9,7 @@ export type User = {
   photoUrl?: string
   googleAccessToken?: string
   googleTokenExpiry?: Date
+  googleRefreshToken?: string
   googleIntegrations?: {
     contacts: boolean
     gmail: boolean

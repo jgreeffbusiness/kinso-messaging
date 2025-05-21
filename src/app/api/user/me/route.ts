@@ -44,7 +44,8 @@ export async function GET() {
         photoUrl: user.photoUrl,
         googleAccessToken: user.googleAccessToken,
         googleTokenExpiry: user.googleTokenExpiry,
-        googleIntegrations: user.googleIntegrations,
+        googleIntegrations: user.googleIntegrations,  
+        googleRefreshToken: user.googleRefreshToken,
       }
     })
   } catch (error) {

@@ -14,6 +14,7 @@ import {
   SelectTrigger, 
   SelectValue 
 } from '@components/ui/select'
+import SyncEmailsButton from '@components/SyncEmailsButton'
 
 export default function MessagesPage() {
   const router = useRouter()
@@ -38,6 +39,7 @@ export default function MessagesPage() {
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-2xl font-bold">Messages</h1>
+          <SyncEmailsButton />
         </div>
         
         {/* Filters */}

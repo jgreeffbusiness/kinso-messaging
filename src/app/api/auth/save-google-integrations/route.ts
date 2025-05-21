@@ -7,6 +7,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'
 
 interface IntegrationsBody {
   token: string
+  refreshToken: string
   integrations: {
     contacts: boolean
     gmail: boolean
@@ -29,8 +30,8 @@ export async function POST(request: Request) {
     
     // Get data from request
     const body = await request.json() as IntegrationsBody
-    const { token, integrations } = body
-    
+    const { token, refreshToken, integrations } = body
+console.log(body)
     if (!token) {
       return NextResponse.json({ error: 'Missing token' }, { status: 400 })
     }
@@ -43,6 +44,7 @@ export async function POST(request: Request) {
       where: { id: decoded.userId },
       data: {
         googleAccessToken: token,
+        googleRefreshToken: refreshToken,
         googleTokenExpiry: tokenExpiry,
         googleIntegrations: integrations
       }
