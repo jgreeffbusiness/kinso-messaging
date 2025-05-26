@@ -24,12 +24,20 @@ model User {
   googleRefreshToken String?
   googleTokenExpiry  DateTime?
   googleIntegrations Json?
+  slackAccessToken   String?
+  slackRefreshToken  String?
+  slackTokenExpiry   DateTime?
+  slackTeamId        String?
+  slackUserId        String?
+  slackIntegrations  Json?
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   contacts           Contact[]
   messages           Message[]
   contactMessages    ContactMessage[]
   notes              Note[]
+  pendingApprovals   PendingContactApproval[]
+  blacklistedSenders BlacklistedSender[]
 }
 
 model Contact {
@@ -45,6 +53,7 @@ model Contact {
   googleId        String?        @unique
   phone           String?
   source          String? // "google", "manual", etc.
+  platformData    Json?          // Cross-platform identity information
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
   contactMessages ContactMessage[]
@@ -62,6 +71,7 @@ model Message {
   platformMessageId String
   timestamp         DateTime
   content           String
+  readAt            DateTime?
   summary           Summary?
 }
 
@@ -105,4 +115,58 @@ model Note {
 
   @@index([contactId])
   @@index([userId])
+}
+
+model PendingContactApproval {
+  id               String           @id @default(cuid())
+  userId           String
+  platform         String
+  senderName       String
+  senderEmail      String?
+  senderHandle     String?
+  messageCount     Int              @default(1)
+  firstMessageDate DateTime
+  lastMessageDate  DateTime
+  previewContent   String?
+  createdAt        DateTime         @default(now())
+
+  // Relations
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages         PendingMessage[]
+
+  @@index([userId])
+  @@index([platform])
+}
+
+model PendingMessage {
+  id                  String                  @id @default(cuid())
+  pendingApprovalId   String
+  content             String
+  timestamp           DateTime
+  platformMessageId   String
+  createdAt           DateTime                @default(now())
+
+  // Relations
+  pendingApproval     PendingContactApproval  @relation(fields: [pendingApprovalId], references: [id], onDelete: Cascade)
+
+  @@index([pendingApprovalId])
+}
+
+model BlacklistedSender {
+  id           String   @id @default(cuid())
+  userId       String
+  platform     String
+  senderName   String?
+  senderEmail  String?
+  senderHandle String?
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  // Relations
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([platform])
+  @@unique([userId, platform, senderEmail])
+  @@unique([userId, platform, senderHandle])
 }

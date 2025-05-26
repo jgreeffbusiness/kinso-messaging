@@ -13,32 +13,70 @@ export async function POST(request: NextRequest) {
   try {
     const { idToken } = await request.json()
     
+    if (!idToken) {
+      return NextResponse.json(
+        { error: 'ID token is required' },
+        { status: 400 }
+      )
+    }
+    
     // Verify Firebase token
-    const decodedToken = await adminAuth.verifyIdToken(idToken)
+    let decodedToken
+    try {
+      decodedToken = await adminAuth.verifyIdToken(idToken)
+    } catch (tokenError) {
+      console.error('Firebase token verification failed:', tokenError)
+      return NextResponse.json(
+        { error: 'Invalid or expired token' },
+        { status: 401 }
+      )
+    }
+    
+    // Extract user information from Firebase token
+    const {
+      uid: authId,
+      email = '',
+      name = '',
+      picture: photoUrl
+    } = decodedToken
+    
+    console.log(`🔐 Auth request for user: ${email} (${authId})`)
     
     // Find or create user in database
     const user = await prisma.user.upsert({
-      where: { authId: decodedToken.uid },
+      where: { authId },
       update: {
-        email: decodedToken.email,
-        name: decodedToken.name || '',
-        photoUrl: decodedToken.picture,
+        email,
+        name,
+        photoUrl,
         updatedAt: new Date()
       },
       create: {
-        authId: decodedToken.uid,
-        email: decodedToken.email || '',
-        name: decodedToken.name || '',
-        photoUrl: decodedToken.picture,
+        authId,
+        email,
+        name,
+        photoUrl,
         authProvider: 'firebase',
+        createdAt: new Date(),
+        updatedAt: new Date()
       }
     })
+    
+    const isNewUser = user.createdAt.getTime() === user.updatedAt.getTime()
+    
+    if (isNewUser) {
+      console.log(`✨ New user created: ${user.email} (${user.id})`)
+    } else {
+      console.log(`👋 Existing user signed in: ${user.email} (${user.id})`)
+    }
     
     // Create session token
     const sessionToken = sign(
       { 
         userId: user.id,
         authId: user.authId,
+        email: user.email,
+        iat: Math.floor(Date.now() / 1000)
       },
       JWT_SECRET,
       { expiresIn: SESSION_EXPIRY }
@@ -58,19 +96,27 @@ export async function POST(request: NextRequest) {
     
     // Return user data (excluding sensitive info)
     return NextResponse.json({
+      success: true,
       user: {
         id: user.id,
         authId: user.authId,
         email: user.email,
         name: user.name,
-        photoUrl: user.photoUrl
-      }
+        photoUrl: user.photoUrl,
+        isNewUser,
+        hasGoogleIntegration: !!user.googleAccessToken,
+        hasSlackIntegration: !!user.slackAccessToken
+      },
+      message: isNewUser ? 'Account created successfully' : 'Welcome back!'
     })
   } catch (error) {
-    console.error('Login error:', error)
+    console.error('❌ Login error:', error)
     return NextResponse.json(
-      { error: 'Authentication failed' },
-      { status: 401 }
+      { 
+        error: 'Authentication failed',
+        details: process.env.NODE_ENV === 'development' ? error instanceof Error ? error.message : String(error) : undefined
+      },
+      { status: 500 }
     )
   }
-} 
+}

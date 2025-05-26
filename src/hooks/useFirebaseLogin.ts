@@ -11,11 +11,10 @@ export async function loginWithGoogle() {
     
     // Set loading state
     useAuthStore.getState().setLoading(true)
+    useAuthStore.getState().clearError()
     
     // Sign in with Firebase
     const result = await signInWithPopup(auth, provider)
-    const credential = GoogleAuthProvider.credentialFromResult(result)
-    const accessToken = credential?.accessToken
     
     // Get Firebase ID token
     const idToken = await result.user.getIdToken()
@@ -27,18 +26,28 @@ export async function loginWithGoogle() {
       body: JSON.stringify({ idToken })
     })
     
+    const data = await response.json()
+    
     if (!response.ok) {
-      throw new Error('Login failed')
+      throw new Error(data.error || 'Login failed')
     }
     
-    const { user } = await response.json()
+    if (!data.success || !data.user) {
+      throw new Error('Invalid response from server')
+    }
     
-    useAuthStore.getState().setUser(user)
-
-    return user
+    // Set user in store
+    useAuthStore.getState().setUser(data.user)
+    
+    console.log(data.message || 'Login successful')
+    
+    return data.user
   } catch (err) {
     console.error('Login failed:', err)
-    useAuthStore.getState().setError(err instanceof Error ? err.message : 'Login failed')
+    const errorMessage = err instanceof Error ? err.message : 'Login failed'
+    useAuthStore.getState().setError(errorMessage)
     throw err
+  } finally {
+    useAuthStore.getState().setLoading(false)
   }
 }

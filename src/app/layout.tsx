@@ -4,6 +4,8 @@ import { TrpcProvider } from '@utils/trpcProvider'
 import { AuthProvider } from '@components/AuthProvider' 
 import { UserSessionProvider } from '@components/UserSessionProvider'
 import { ChatProvider } from '@providers/ChatProvider'
+import { SelectedMessageProvider } from '@providers/SelectedMessageProvider'
+import { AutoSyncInitializer } from '@components/AutoSyncInitializer'
 
 const inter = Inter({ subsets: ['latin'] })
 
@@ -11,15 +13,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className={inter.className}>
-        <ChatProvider>
-          <AuthProvider>
-            <UserSessionProvider>
-              <TrpcProvider>
-                {children}
-              </TrpcProvider>
-            </UserSessionProvider>
-          </AuthProvider>
-        </ChatProvider>
+        <SelectedMessageProvider>
+          <ChatProvider>
+            <AuthProvider>
+              <UserSessionProvider>
+                <TrpcProvider>
+                  <AutoSyncInitializer />
+                  {children}
+                </TrpcProvider>
+              </UserSessionProvider>
+            </AuthProvider>
+          </ChatProvider>
+        </SelectedMessageProvider>
       </body>
     </html>
   )
+}

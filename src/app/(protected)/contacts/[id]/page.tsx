@@ -8,7 +8,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@components/ui/avatar'
 import { Button } from '@components/ui/button'
 import { Pencil, MessageSquare, ArrowLeft } from 'lucide-react'
 import { Separator } from '@components/ui/separator'
-import SyncEmailsButton from '@components/SyncEmailsButton'
+import { SmartSyncButton } from '@components/SmartSyncButton'
 
 export default function ContactDetailPage() {
   const params = useParams()
@@ -81,7 +81,7 @@ export default function ContactDetailPage() {
                       <MessageSquare className="h-3.5 w-3.5" />
                       Message
                     </Button>
-                    <SyncEmailsButton contactId={contact.id} variant="outline" />
+                    <SmartSyncButton contactId={contact.id} variant="outline" />
                   </div>
                 </div>
               </div>
