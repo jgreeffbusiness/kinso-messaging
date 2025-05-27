@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useState, ReactNode } from 'react'
+import { createContext, useContext, useState, ReactNode, Dispatch, SetStateAction } from 'react'
 
 type Message = {
   id: number
@@ -11,9 +11,11 @@ type Message = {
 
 type ChatContextType = {
   inputValue: string
-  setInputValue: (value: string) => void
+  setInputValue: Dispatch<SetStateAction<string>>
   messages: Message[]
   addMessage: (message: Omit<Message, 'id'>) => void
+  aiIsResponding: boolean
+  setAiIsResponding: Dispatch<SetStateAction<boolean>>
   // No open/close methods needed
 }
 
@@ -23,12 +25,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [inputValue, setInputValue] = useState('')
   const [messages, setMessages] = useState<Message[]>([
     {
-      id: 1,
+      id: Date.now(),
       content: "How can I help you today?",
       sender: "assistant",
       createdAt: new Date().toISOString()
     }
   ])
+  const [aiIsResponding, setAiIsResponding] = useState(false)
   
   const addMessage = (message: Omit<Message, 'id'>) => {
     setMessages(prev => [...prev, { ...message, id: Date.now() }])
@@ -50,7 +53,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       inputValue,
       setInputValue,
       messages,
-      addMessage
+      addMessage,
+      aiIsResponding,
+      setAiIsResponding
     }}>
       {children}
     </ChatContext.Provider>

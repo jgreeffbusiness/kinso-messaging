@@ -80,6 +80,7 @@ export async function GET(request: NextRequest) {
           enabled: true,
           gmail: true,
           contacts: true,
+          calendar: false, // Default to false for calendar
           scopes: [
             'https://www.googleapis.com/auth/gmail.readonly',
             'https://www.googleapis.com/auth/gmail.send',

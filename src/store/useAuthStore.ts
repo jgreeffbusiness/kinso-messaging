@@ -18,6 +18,7 @@ export type User = {
     gmail: boolean
     calendar: boolean
   }
+  slackUserId?: string;
 }
 
 interface AuthState {
@@ -25,6 +26,7 @@ interface AuthState {
   isLoading: boolean
   error: string | null
   isAuthenticated: boolean
+  _hasHydrated: boolean
 }
 
 interface AuthActions {
@@ -33,6 +35,7 @@ interface AuthActions {
   setError: (error: string | null) => void
   logout: () => Promise<void>
   clearError: () => void
+  setHasHydrated: (hasHydrated: boolean) => void
 }
 
 export const useAuthStore = create<AuthState & AuthActions>()(
@@ -40,9 +43,10 @@ export const useAuthStore = create<AuthState & AuthActions>()(
     (set) => ({
       // State
       user: null,
-      isLoading: false,
+      isLoading: true, // Start with loading=true to prevent premature redirects
       error: null,
       isAuthenticated: false,
+      _hasHydrated: false,
 
       // Actions
       setUser: (user) => set({ 
@@ -56,6 +60,8 @@ export const useAuthStore = create<AuthState & AuthActions>()(
       setError: (error) => set({ error, isLoading: false }),
 
       clearError: () => set({ error: null }),
+
+      setHasHydrated: (hasHydrated) => set({ _hasHydrated: hasHydrated }),
 
       logout: async () => {
         try {
@@ -99,6 +105,10 @@ export const useAuthStore = create<AuthState & AuthActions>()(
         user: state.user,
         isAuthenticated: state.isAuthenticated
       }), // Only persist user and auth status, not loading/error states
+      onRehydrateStorage: () => (state) => {
+        // Just mark as hydrated, don't mess with loading states
+        state?.setHasHydrated(true)
+      },
     }
   )
 ) 

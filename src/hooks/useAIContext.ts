@@ -1,138 +1,204 @@
-import { useState, useEffect, useRef } from 'react'
-import { AIContext, ThreadData } from '@/lib/ai-context'
-
-interface Message {
-  id: string
-  content: string
-  timestamp: string | Date
-  platformData?: Record<string, unknown>
-  contact?: {
-    id: string
-    fullName: string
-    email: string | null
-  }
-}
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { ThreadAnalysis, ThreadData } from '@/lib/thread-processor'
+import { ActiveFocusItemType } from '@/providers/ActiveFocusProvider'
+import { EnhancedMessage, Message as ThreadMessageItem, PlatformData as MessagePlatformData } from '@hooks/useThreadedMessages'
+import { useAuth } from '@/components/AuthProvider'
 
 interface UseAIContextProps {
-  selectedMessageId?: string
-  messages: Message[]
+  activeItem: ActiveFocusItemType
+  allMessages: ThreadMessageItem[]
 }
 
 // Cache for AI contexts to avoid re-analyzing the same threads
-const contextCache = new Map<string, AIContext>()
+const contextCache = new Map<string, ThreadAnalysis>()
 
-export function useAIContext({ selectedMessageId, messages }: UseAIContextProps) {
-  const [context, setContext] = useState<AIContext | null>(null)
+export function useAIContext({ activeItem, allMessages }: UseAIContextProps) {
+  const { user } = useAuth()
+  const userEmail = user?.email
+
+  const [context, setContext] = useState<ThreadAnalysis | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const timeoutRef = useRef<NodeJS.Timeout>()
+  const fetchingForItemRef = useRef<ActiveFocusItemType | null>(null)
+  const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
-  useEffect(() => {
-    // Clear any pending requests
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current)
-    }
-
-    if (!selectedMessageId || !messages.length) {
-      setContext(null)
+  const generateContext = useCallback(async (currentItem: ActiveFocusItemType) => {
+    if (!currentItem || !userEmail) {
+      if (!userEmail) console.warn('useAIContext: User email not available for context generation.')
+      if (fetchingForItemRef.current === currentItem || !activeItem) {
+        setContext(null)
+        setLoading(false)
+        setError(null)
+      }
       return
     }
 
-    // Debounce the analysis to avoid rapid-fire requests
-    timeoutRef.current = setTimeout(() => {
-      generateContext().catch(console.error)
-    }, 300) // 300ms debounce
+    fetchingForItemRef.current = currentItem
 
-    return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current)
+    let messageToProcess: EnhancedMessage | ThreadMessageItem | undefined
+    let threadIdToUse: string | undefined
+
+    if (currentItem.type === 'message' || currentItem.type === 'dashboard_item') {
+      messageToProcess = currentItem.data
+      threadIdToUse = String((currentItem.data.platformData as MessagePlatformData)?.threadId || currentItem.data.id)
+    } else if (currentItem.type === 'message_id_only') {
+      messageToProcess = allMessages.find(msg => msg.id === currentItem.id)
+      if (messageToProcess) {
+        threadIdToUse = String((messageToProcess.platformData as MessagePlatformData)?.threadId || messageToProcess.id)
       }
     }
-  }, [selectedMessageId, messages])
 
-  const generateContext = async () => {
-    if (!selectedMessageId || !messages.length) return
-
-    try {
-      // Find the selected message
-      const selectedMessage = messages.find(msg => msg.id === selectedMessageId)
-      if (!selectedMessage) {
-        throw new Error('Selected message not found')
+    if (!messageToProcess || !threadIdToUse) {
+      if (fetchingForItemRef.current === currentItem) {
+        setError('Could not identify message to process for AI context.')
+        setContext(null)
+        setLoading(false)
       }
-
-      // Get thread ID from the selected message
-      const threadId = String(selectedMessage.platformData?.threadId || selectedMessage.id)
-      
-      // Check cache first
-      const cached = contextCache.get(threadId)
-      if (cached) {
+      return
+    }
+    
+    const finalThreadId = threadIdToUse
+    const cached = contextCache.get(finalThreadId)
+    if (cached) {
+      if (fetchingForItemRef.current === currentItem) {
         setContext(cached)
         setLoading(false)
         setError(null)
-        return
       }
+      return
+    }
 
+    if (fetchingForItemRef.current === currentItem) {
       setLoading(true)
       setError(null)
-      
-      // Find all messages in the same thread
-      const threadMessages = messages.filter(msg => 
-        String(msg.platformData?.threadId || msg.id) === threadId
-      )
+    } else {
+      return
+    }
+    
+    const threadMessages = allMessages.filter(msg => 
+      String((msg.platformData as MessagePlatformData)?.threadId || msg.id) === finalThreadId
+    )
 
-      // Prepare thread data for AI analysis
-      const threadData: ThreadData = {
-        id: threadId,
-        subject: String(selectedMessage.platformData?.subject || 'No Subject'),
-        messages: threadMessages.map(msg => ({
-          id: msg.id,
-          content: msg.content,
-          timestamp: new Date(msg.timestamp),
-          from: String(msg.platformData?.from || 'Unknown'),
-          platformData: msg.platformData,
-          contact: msg.contact
-        }))
+    if (threadMessages.length === 0) {
+      if (fetchingForItemRef.current === currentItem) {
+        setError('No messages found for this thread to analyze.')
+        setContext(null)
+        setLoading(false)
       }
+      return
+    }
+    
+    const representativeMessageForAnalysis = messageToProcess as EnhancedMessage
+    const representativePlatformData = representativeMessageForAnalysis.platformData as MessagePlatformData | undefined
 
-      // Call API endpoint for AI context generation
+    if (representativePlatformData?.analysis) {
+      if (fetchingForItemRef.current === currentItem) {
+        console.log('Using pre-existing analysis from activeItem for thread:', finalThreadId)
+        setContext(representativePlatformData.analysis)
+        contextCache.set(finalThreadId, representativePlatformData.analysis)
+        setLoading(false)
+      }
+      return
+    }
+
+    const apiMessages: ThreadData['messages'] = threadMessages.map(msg => {
+      const pData = msg.platformData as MessagePlatformData | undefined
+      const fromAddress = String(pData?.from || msg.contact?.fullName || 'Unknown').toLowerCase()
+      const localUserEmail = userEmail?.toLowerCase() || '@#$NOMATCH$#@'
+      
+      return {
+        id: msg.id,
+        from: String(pData?.from || msg.contact?.fullName || 'Unknown'), 
+        to: pData?.to || [], 
+        subject: String(pData?.subject || representativePlatformData?.subject || 'No Subject'),
+        content: msg.content,
+        timestamp: new Date(msg.timestamp),
+        direction: fromAddress.includes(localUserEmail) ? 'outbound' : 'inbound', 
+        isFromUser: fromAddress.includes(localUserEmail),
+      }
+    })
+
+    const threadDataForAPI: ThreadData = {
+      id: finalThreadId,
+      subject: String(representativePlatformData?.subject || 'No Subject'),
+      messages: apiMessages
+    }
+
+    try {
+      console.log('No pre-existing analysis, calling /api/ai/context for thread:', finalThreadId)
+      const contactNameForAPI = representativeMessageForAnalysis.contact?.fullName || 'Unknown Contact'
+      
       const response = await fetch('/api/ai/context', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(threadData)
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ threadData: threadDataForAPI, userEmail, contactName: contactNameForAPI })
       })
 
+      if (fetchingForItemRef.current !== currentItem) return
+
       if (!response.ok) {
-        throw new Error(`API error: ${response.status}`)
+        const errorData = await response.text()
+        throw new Error(`API error on /api/ai/context: ${response.status} - ${errorData}`)
       }
 
-      const aiContext = await response.json()
-      
-      // Cache the result
-      contextCache.set(threadId, aiContext)
-      
-      setContext(aiContext)
+      const aiGeneratedContext = await response.json() as ThreadAnalysis
+      contextCache.set(finalThreadId, aiGeneratedContext)
+      if (fetchingForItemRef.current === currentItem) setContext(aiGeneratedContext)
     } catch (err) {
-      console.error('Failed to generate AI context:', err)
-      setError(err instanceof Error ? err.message : 'Failed to analyze thread')
+      console.error('Failed to generate AI context via API:', err)
+      if (fetchingForItemRef.current === currentItem) setError(err instanceof Error ? err.message : 'Failed to analyze thread via API')
     } finally {
-      setLoading(false)
+      if (fetchingForItemRef.current === currentItem) setLoading(false)
     }
-  }
+  }, [allMessages, userEmail])
+
+  useEffect(() => {
+    console.log('[useAIContext] useEffect triggered. Active item:', activeItem ? activeItem.type + ":" + (activeItem.type !== 'message_id_only' ? activeItem.data.id : activeItem.id) : null)
+    if (debounceTimeoutRef.current) {
+      clearTimeout(debounceTimeoutRef.current)
+    }
+    if (!activeItem) {
+      setContext(null)
+      setLoading(false)
+      setError(null)
+      fetchingForItemRef.current = null
+      return
+    }
+
+    if (fetchingForItemRef.current && 
+        ((fetchingForItemRef.current.type !== 'message_id_only' && activeItem.type !== 'message_id_only' && fetchingForItemRef.current.data.id === activeItem.data.id) || 
+         (fetchingForItemRef.current.type === 'message_id_only' && activeItem.type === 'message_id_only' && fetchingForItemRef.current.id === activeItem.id)) && 
+        context) {
+        return
+    }
+
+    debounceTimeoutRef.current = setTimeout(() => {
+      generateContext(activeItem)
+    }, 300)
+
+    return () => {
+      if (debounceTimeoutRef.current) {
+        clearTimeout(debounceTimeoutRef.current)
+      }
+    }
+  }, [activeItem, generateContext])
 
   return {
     context,
     loading,
     error,
     refetch: () => {
-      if (selectedMessageId) {
-        const selectedMessage = messages.find(msg => msg.id === selectedMessageId)
-        if (selectedMessage) {
-          const threadId = String(selectedMessage.platformData?.threadId || selectedMessage.id)
-          // Clear cache for this thread and regenerate
-          contextCache.delete(threadId)
-          generateContext().catch(console.error)
+      if (activeItem) {
+        let threadIdToClearCache: string | undefined
+        if (activeItem.type === 'message' || activeItem.type === 'dashboard_item') {
+          threadIdToClearCache = String((activeItem.data.platformData as MessagePlatformData)?.threadId || activeItem.data.id)
+        } else if (activeItem.type === 'message_id_only') {
+          const msg = allMessages.find(m => m.id === activeItem.id)
+          threadIdToClearCache = String((msg?.platformData as MessagePlatformData)?.threadId || msg?.id)
+        }
+        if (threadIdToClearCache) {
+          contextCache.delete(threadIdToClearCache)
+          generateContext(activeItem).catch(console.error)
         }
       }
     }

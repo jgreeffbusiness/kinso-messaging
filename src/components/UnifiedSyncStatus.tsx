@@ -38,11 +38,12 @@ interface UnifiedSyncStatus {
   crossPlatformContacts: number
 }
 
-interface PlatformData {
+interface ApiPlatformData {
   platform: string
-  contacts?: number
-  messages?: number
+  contactsProcessed?: number
+  messagesProcessed?: number
   newMessages?: number
+  errors?: string[]
 }
 
 export function UnifiedSyncStatus() {
@@ -51,7 +52,8 @@ export function UnifiedSyncStatus() {
 
   useEffect(() => {
     fetchSyncStatus()
-    const interval = setInterval(fetchSyncStatus, 5 * 60 * 1000) // Update every 5 minutes instead of 30 seconds
+    // Check status occasionally, but don't poll aggressively since we use webhooks
+    const interval = setInterval(fetchSyncStatus, 10 * 60 * 1000) // Every 10 minutes
     return () => clearInterval(interval)
   }, [])
 
@@ -61,17 +63,17 @@ export function UnifiedSyncStatus() {
       if (response.ok) {
         const status = await response.json()
         
-        // Mock platform data - in real app this would come from the API
+        // Extract platform data from the sync result
         const platforms: PlatformSyncStatus[] = [
           {
             platform: 'slack',
             connected: true,
             enabled: true,
             lastSync: status.lastSync,
-            contacts: status.syncStatus?.platforms?.find((p: PlatformData) => p.platform === 'slack')?.contacts || 0,
-            messages: status.syncStatus?.platforms?.find((p: PlatformData) => p.platform === 'slack')?.messages || 0,
-            recentMessages: status.syncStatus?.platforms?.find((p: PlatformData) => p.platform === 'slack')?.newMessages || 0,
-            errors: [],
+            contacts: status.platforms?.find((p: ApiPlatformData) => p.platform === 'slack')?.contactsProcessed || 0,
+            messages: status.platforms?.find((p: ApiPlatformData) => p.platform === 'slack')?.messagesProcessed || 0,
+            recentMessages: status.platforms?.find((p: ApiPlatformData) => p.platform === 'slack')?.newMessages || 0,
+            errors: status.platforms?.find((p: ApiPlatformData) => p.platform === 'slack')?.errors || [],
             syncing: status.currentlySyncing
           },
           {
@@ -79,22 +81,22 @@ export function UnifiedSyncStatus() {
             connected: true,
             enabled: true,
             lastSync: status.lastSync,
-            contacts: status.syncStatus?.platforms?.find((p: PlatformData) => p.platform === 'gmail')?.contacts || 0,
-            messages: status.syncStatus?.platforms?.find((p: PlatformData) => p.platform === 'gmail')?.messages || 0,
-            recentMessages: status.syncStatus?.platforms?.find((p: PlatformData) => p.platform === 'gmail')?.newMessages || 0,
-            errors: [],
+            contacts: status.platforms?.find((p: ApiPlatformData) => p.platform === 'gmail')?.contactsProcessed || 0,
+            messages: status.platforms?.find((p: ApiPlatformData) => p.platform === 'gmail')?.messagesProcessed || 0,
+            recentMessages: status.platforms?.find((p: ApiPlatformData) => p.platform === 'gmail')?.newMessages || 0,
+            errors: status.platforms?.find((p: ApiPlatformData) => p.platform === 'gmail')?.errors || [],
             syncing: status.currentlySyncing
           }
         ]
 
         setSyncStatus({
-          autoSyncEnabled: status.autoSyncEnabled,
+          autoSyncEnabled: status.webhooksEnabled || false, // Show webhook status instead
           currentlySyncing: status.currentlySyncing,
           lastSync: status.lastSync,
           platforms,
-          totalContacts: platforms.reduce((sum, p) => sum + p.contacts, 0),
-          totalMessages: platforms.reduce((sum, p) => sum + p.messages, 0),
-          crossPlatformContacts: 0 // Would come from unified contact count
+          totalContacts: status.totalContactsProcessed || platforms.reduce((sum, p) => sum + p.contacts, 0),
+          totalMessages: status.totalMessagesProcessed || platforms.reduce((sum, p) => sum + p.messages, 0),
+          crossPlatformContacts: status.crossPlatformMatches || 0
         })
       }
     } catch (error) {
@@ -105,22 +107,9 @@ export function UnifiedSyncStatus() {
   }
 
   const toggleAutoSync = async (enabled: boolean) => {
-    try {
-      const response = await fetch('/api/sync/auto', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          action: enabled ? 'start' : 'stop',
-          config: { intervalMinutes: 5 }
-        })
-      })
-      
-      if (response.ok) {
-        setSyncStatus(prev => prev ? { ...prev, autoSyncEnabled: enabled } : null)
-      }
-    } catch (error) {
-      console.error('Failed to toggle auto-sync:', error)
-    }
+    // In webhook-driven mode, this just shows the status
+    // Real sync happens on page load + webhooks
+    console.log(`Webhook-driven sync is always enabled. Current status: ${enabled}`)
   }
 
   const forceSyncNow = async () => {

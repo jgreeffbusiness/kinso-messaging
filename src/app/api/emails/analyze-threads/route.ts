@@ -117,46 +117,42 @@ export async function POST(request: NextRequest) {
           lastActivity: threadMessages[threadMessages.length - 1].timestamp
         })
 
-        // Store the analysis as a summary message
+        const platformMessageIdForSummary = `thread_summary_${threadId}`;
+
         const existingSummary = await prisma.message.findFirst({
           where: {
             userId: decoded.userId,
             contactId,
-            platformMessageId: `thread_summary_${threadId}`
+            platformMessageId: platformMessageIdForSummary
           }
         })
 
+        const summaryContent = analysis.summary; 
+
+        const summaryDataForDb = {
+          content: summaryContent,
+          timestamp: new Date(),
+          platformData: {
+            isThreadSummary: true,
+            threadId,
+            analysis: JSON.parse(JSON.stringify(analysis)),
+            messageCount: threadMessages.length
+          }
+        }
+
         if (existingSummary) {
-          // Update existing summary
           await prisma.message.update({
             where: { id: existingSummary.id },
-            data: {
-              content: analysis.threadSummary,
-              timestamp: new Date(),
-              platformData: {
-                isThreadSummary: true,
-                threadId,
-                analysis: JSON.parse(JSON.stringify(analysis)),
-                messageCount: threadMessages.length
-              }
-            }
+            data: summaryDataForDb
           })
         } else {
-          // Create new summary
           await prisma.message.create({
             data: {
               userId: decoded.userId,
               contactId,
               platform: 'thread_summary',
-              platformMessageId: `thread_summary_${threadId}`,
-              content: analysis.threadSummary,
-              timestamp: new Date(),
-              platformData: {
-                isThreadSummary: true,
-                threadId,
-                analysis: JSON.parse(JSON.stringify(analysis)),
-                messageCount: threadMessages.length
-              }
+              platformMessageId: platformMessageIdForSummary,
+              ...summaryDataForDb
             }
           })
         }

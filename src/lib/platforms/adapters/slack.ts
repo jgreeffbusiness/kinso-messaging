@@ -788,55 +788,73 @@ export class SlackAdapter implements PlatformAdapter {
    * Make rate-limited API call with exponential backoff
    */
   private async makeSlackAPICall(url: string, options: RequestInit, userId: string): Promise<Response> {
-    const endpoint = url.split('/').pop() || 'unknown'
-    const rateLimitKey = `${userId}-${endpoint}`
-    
-    // Check if we need to wait due to previous rate limiting
-    const rateLimitInfo = this.rateLimitState.get(rateLimitKey)
-    if (rateLimitInfo && Date.now() < rateLimitInfo.nextAllowedTime) {
-      const waitTime = rateLimitInfo.nextAllowedTime - Date.now()
-      console.log(`Rate limited for ${endpoint}, waiting ${waitTime}ms`)
-      await new Promise(resolve => setTimeout(resolve, waitTime))
-    }
+    const MAX_RETRIES = 2; // Reduced max retries for faster feedback
+    const INITIAL_WAIT_MS = 1000;
+    const MAX_WAIT_PER_RETRY_MS = 15000; // Max wait for a single retry attempt (15 seconds)
 
-    try {
-      const response = await fetch(url, options)
-      
-      // Check for rate limiting in response
-      if (response.status === 429) {
-        const retryAfter = parseInt(response.headers.get('Retry-After') || '60')
-        const currentInfo = this.rateLimitState.get(rateLimitKey) || { retryCount: 0, nextAllowedTime: 0 }
-        
-        // Exponential backoff: start with retry-after, then double for each subsequent retry
-        const backoffMultiplier = Math.pow(2, currentInfo.retryCount)
-        const waitTime = retryAfter * 1000 * backoffMultiplier
-        
-        console.log(`Slack API rate limited for ${endpoint}. Retry ${currentInfo.retryCount + 1}, waiting ${waitTime}ms`)
-        
-        this.rateLimitState.set(rateLimitKey, {
-          nextAllowedTime: Date.now() + waitTime,
-          retryCount: currentInfo.retryCount + 1
-        })
-        
-        // Wait and retry (max 3 retries)
-        if (currentInfo.retryCount < 3) {
-          await new Promise(resolve => setTimeout(resolve, waitTime))
-          return this.makeSlackAPICall(url, options, userId)
-        } else {
-          throw new Error(`Max retries exceeded for ${endpoint} due to rate limiting`)
+    let attempt = 0;
+    while (attempt <= MAX_RETRIES) {
+      const rateLimitInfo = this.rateLimitState.get(userId) || { nextAllowedTime: 0, retryCount: 0 };
+      const currentTime = Date.now();
+
+      if (currentTime < rateLimitInfo.nextAllowedTime) {
+        const waitTime = rateLimitInfo.nextAllowedTime - currentTime;
+        // Only log if waitTime is significant to avoid spamming logs for very short waits
+        if (waitTime > 100) {
+            console.warn(`Slack API general rate limit cool-down for user ${userId}. Waiting ${waitTime}ms before retry ${attempt}...`);
         }
+        await new Promise(resolve => setTimeout(resolve, waitTime));
       }
       
-      // Reset rate limit state on successful request
-      if (response.ok) {
-        this.rateLimitState.delete(rateLimitKey)
+      if (currentTime >= rateLimitInfo.nextAllowedTime && rateLimitInfo.retryCount > 0 && attempt === 0) {
+          // If a previous hard rate limit caused a long wait, and we are now past it, reset local retry count for this call chain
+          this.rateLimitState.set(userId, { nextAllowedTime: 0, retryCount: 0 });
       }
-      
-      return response
-    } catch (error) {
-      console.error(`Slack API call failed for ${endpoint}:`, error)
-      throw error
+
+      const response = await fetch(url, options);
+
+      if (response.status === 429) { 
+        attempt++;
+        const retryAfterHeader = response.headers.get('Retry-After');
+        let retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
+        
+        if (isNaN(retryAfterSeconds)) retryAfterSeconds = 0;
+
+        let waitMs;
+        if (retryAfterSeconds > 0) {
+            waitMs = Math.min(MAX_WAIT_PER_RETRY_MS, retryAfterSeconds * 1000); 
+        } else {
+            // Exponential backoff if no Retry-After header, or if it's 0
+            waitMs = Math.min(MAX_WAIT_PER_RETRY_MS, (INITIAL_WAIT_MS * Math.pow(2, attempt -1 )) + Math.floor(Math.random() * 1000));
+        }
+        
+        console.warn(`Slack API rate limited for ${url}. Attempt ${attempt}/${MAX_RETRIES}. Retry-After: ${retryAfterHeader || 'N/A'}. Waiting ${waitMs}ms.`);
+        
+        this.rateLimitState.set(userId, { 
+            nextAllowedTime: Date.now() + waitMs, 
+            retryCount: attempt 
+        });
+
+        if (attempt > MAX_RETRIES) {
+          console.error(`Slack API rate limit exceeded after ${MAX_RETRIES} retries for ${url}.`);
+          // Throw a custom error object or an error with a specific code/property
+          const error = new Error(`Slack API rate limit hit after ${MAX_RETRIES} retries. Please try again later.`);
+          (error as any).isRateLimitError = true;
+          throw error;
+        }
+        // Continue to next iteration of the while loop to wait
+      } else {
+         if (this.rateLimitState.has(userId) && this.rateLimitState.get(userId)?.retryCount === attempt && attempt > 0) {
+             // If we made it through after some retries for this specific call chain, clear the state for this user for next independent call chain.
+             this.rateLimitState.delete(userId);
+         }
+        return response; 
+      }
     }
+    // Fallback, should ideally be caught by the retry limit check above.
+    const error = new Error(`Slack API call failed after ${MAX_RETRIES} retries due to rate limiting for ${url}.`);
+    (error as any).isRateLimitError = true;
+    throw error;
   }
 }
 

@@ -15,6 +15,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@lib/utils'
 import { Badge } from '@components/ui/badge'
+import { SuggestedAction, ThreadAnalysis } from '@/lib/thread-processor'
+import { PlatformData as MessagePlatformData } from '@hooks/useThreadedMessages'
 
 interface MessageItemProps {
   message: {
@@ -28,52 +30,14 @@ interface MessageItemProps {
       platform: string
       content: string
       timestamp: Date
-      platformData?: {
-        subject?: string
-        direction?: 'inbound' | 'outbound'
-        from?: string
-        to?: string[]
-        cc?: string[]
-        labels?: string[]
-        threadId?: string
-        aiSummary?: string
-        keyPoints?: string[]
-        actionItems?: string[]
-        urgency?: 'low' | 'medium' | 'high'
-        category?: 'meeting' | 'administrative' | 'commercial' | 'personal' | 'notification' | 'other'
-        originalContent?: string
-      }
+      platformData?: MessagePlatformData
       contact: {
         id: string
         fullName: string
         email: string | null
       } | null
     }>
-    platformData?: {
-      subject?: string
-      direction?: 'inbound' | 'outbound'
-      from?: string
-      to?: string[]
-      cc?: string[]
-      labels?: string[]
-      threadId?: string
-      // Enhanced AI fields
-      aiSummary?: string
-      keyPoints?: string[]
-      actionItems?: string[]
-      urgency?: 'low' | 'medium' | 'high'
-      category?: 'meeting' | 'administrative' | 'commercial' | 'personal' | 'notification' | 'other'
-      originalContent?: string
-      isThreadSummary?: boolean
-      analysis?: {
-        keyTopics?: string[]
-        keyInsights?: string[]
-        actionItems?: string[]
-        urgency?: 'low' | 'medium' | 'high'
-        [key: string]: unknown
-      }
-      [key: string]: unknown
-    }
+    platformData?: MessagePlatformData
     readAt?: Date | null
   }
   contact: {
@@ -90,67 +54,46 @@ export function MessageItem({ message, contact, showContact = true }: MessageIte
   // Format the timestamp - show relative time (e.g. "2 days ago")
   const relativeTime = formatDistanceToNow(new Date(message.timestamp), { addSuffix: true })
   
+  // Explicitly typed variables from message.platformData
+  const currentMessagePlatformData: MessagePlatformData | undefined = message.platformData;
+  const analysisFromPlatformData: ThreadAnalysis | null | undefined = currentMessagePlatformData?.analysis;
+  
   // Check if this message has been AI enhanced
-  const isAIEnhanced = !!(message.platformData?.aiSummary)
+  const isAIEnhanced = !!(analysisFromPlatformData || currentMessagePlatformData?.aiSummary)
   
   // Check if this is a thread summary message with rich analysis
-  const isThreadSummary = (message.platformData as any)?.isThreadSummary === true
-  const threadAnalysis = (message.platformData as any)?.analysis
+  const isThreadSummary = !!currentMessagePlatformData?.isThreadSummary
   
-  // For multi-threaded conversations, prefer thread analysis over individual message summary
-  const getDisplayContent = () => {
-    // If this is a thread summary message, use the rich thread content
-    if (isThreadSummary && threadAnalysis) {
-      return {
-        summary: message.content, // This contains the rich narrative
-        keyPoints: threadAnalysis.keyTopics || threadAnalysis.keyInsights || (message.platformData as any)?.keyPoints || [],
-        actionItems: threadAnalysis.actionItems || (message.platformData as any)?.actionItems || [],
-        urgency: threadAnalysis.urgency || (message.platformData as any)?.urgency || 'low'
-      }
-    }
-    
-    // For multi-threaded conversations without thread analysis, try to use thread context
-    if (message.threadCount && message.threadCount > 1 && message.threadMessages) {
-      // Look for thread analysis in the related messages
-      const threadSummaryMsg = message.threadMessages.find(msg => 
-        (msg.platformData as any)?.isThreadSummary === true
-      )
-      
-      if (threadSummaryMsg && (threadSummaryMsg.platformData as any)?.analysis) {
-        const analysis = (threadSummaryMsg.platformData as any).analysis
-        return {
-          summary: threadSummaryMsg.content,
-          keyPoints: analysis.keyTopics || [],
-          actionItems: analysis.actionItems || [],
-          urgency: analysis.urgency || 'low'
-        }
-      }
-    }
-    
-    // Fallback to individual message AI summary
-    return {
-      summary: message.platformData?.aiSummary || (
-        message.content.length > 150 ? `${message.content.slice(0, 150)}...` : message.content
-      ),
-      keyPoints: message.platformData?.keyPoints || [],
-      actionItems: message.platformData?.actionItems || [],
-      urgency: message.platformData?.urgency || 'low'
-    }
-  }
-  
-  const displayContent = getDisplayContent()
+  // Define display values directly based on conditions
+  const displaySummary: string = 
+    isThreadSummary && analysisFromPlatformData?.summary ? analysisFromPlatformData.summary :
+    currentMessagePlatformData?.aiSummary ? currentMessagePlatformData.aiSummary :
+    (message.content.length > 150 ? `${message.content.slice(0, 150)}...` : message.content);
+
+  const displayKeyPoints: string[] = 
+    isThreadSummary && analysisFromPlatformData?.keyInsights ? analysisFromPlatformData.keyInsights :
+    currentMessagePlatformData?.keyPoints || [];
+
+  // actionItems can be SuggestedAction[] or string[], filter logic will handle it
+  const displayActionItems: (SuggestedAction[] | string[]) = 
+    isThreadSummary && analysisFromPlatformData?.actionItems ? analysisFromPlatformData.actionItems : // SuggestedAction[]
+    currentMessagePlatformData?.actionItems || []; // string[]
+
+  const displayUrgency: 'low' | 'medium' | 'high' | 'urgent' = 
+    (isThreadSummary && analysisFromPlatformData?.urgency) ? analysisFromPlatformData.urgency :
+    currentMessagePlatformData?.urgency || 'low';
   
   // Determine message status for styling
   const isUnread = !message.readAt
-  const isHighPriority = displayContent.urgency === 'high'
+  // Refined isHighPriority to include 'urgent'
+  const isUrgent = displayUrgency === 'urgent'
+  const isHighPriority = displayUrgency === 'high' || isUrgent // Urgent implies high priority
   
   // Filter out "no-action" items and empty actions when determining if there are real action items
-  const realActionItems = displayContent.actionItems.filter((action: string) => 
-    action && 
-    action.toLowerCase() !== 'no action required' && 
-    action.toLowerCase() !== 'no action needed' &&
-    !action.toLowerCase().includes('no action')
-  )
+  const realActionItems = displayActionItems.filter((action: string | SuggestedAction) => {
+    const title = typeof action === 'string' ? action : action.title
+    return title && title.toLowerCase() !== 'no action required' && title.toLowerCase() !== 'no action needed' && !title.toLowerCase().includes('no action')
+  })
   const hasActionItems = realActionItems.length > 0
   
   // Get platform display name and icon
@@ -182,37 +125,41 @@ export function MessageItem({ message, contact, showContact = true }: MessageIte
       case 'gmail':
         return {
           iconBg: 'bg-red-100 text-red-600',
-          badge: 'bg-red-100 text-red-800 border-red-200',
-          border: 'border-l-red-500',
-          bg: 'bg-red-50'
+          badge: 'bg-red-50 text-red-700 border-red-100',
+          border: 'border-l-red-400',
+          bg: 'bg-white',
+          unreadDot: 'bg-red-500'
         }
       case 'slack':
         return {
           iconBg: 'bg-purple-100 text-purple-600',
-          badge: 'bg-purple-100 text-purple-800 border-purple-200',
-          border: 'border-l-purple-500',
-          bg: 'bg-purple-50'
+          badge: 'bg-purple-50 text-purple-700 border-purple-100',
+          border: 'border-l-purple-400',
+          bg: 'bg-white',
+          unreadDot: 'bg-purple-500'
         }
       case 'whatsapp':
         return {
           iconBg: 'bg-green-100 text-green-600',
-          badge: 'bg-green-100 text-green-800 border-green-200',
-          border: 'border-l-green-500',
-          bg: 'bg-green-50'
+          badge: 'bg-green-50 text-green-700 border-green-100',
+          border: 'border-l-green-400',
+          bg: 'bg-white',
+          unreadDot: 'bg-green-500'
         }
       default:
         return {
           iconBg: 'bg-gray-100 text-gray-600',
-          badge: 'bg-gray-100 text-gray-800 border-gray-200',
-          border: 'border-l-gray-500',
-          bg: 'bg-gray-50'
+          badge: 'bg-gray-50 text-gray-700 border-gray-100',
+          border: 'border-l-gray-400',
+          bg: 'bg-white',
+          unreadDot: 'bg-gray-500'
         }
     }
   }
 
   const platformStyling = getPlatformStyling(message.platform)
   
-  const subject = message.platformData?.subject || '(No subject)'
+  const subject = currentMessagePlatformData?.subject || '(No subject)'
   
   // Check if we should show original content section
   const hasOriginalOrThread = isAIEnhanced || (message.threadCount && message.threadCount > 1)
@@ -245,18 +192,12 @@ export function MessageItem({ message, contact, showContact = true }: MessageIte
           )}
         </div>
         
-        {/* Platform icon with status */}
-        <div className="flex-shrink-0 flex items-center gap-2">
+        {/* Platform icon with status dot container */}
+        <div className="flex-shrink-0 relative mr-2">
           <div className={cn("p-1.5 rounded-full", platformStyling.iconBg)}>
             {getPlatformIcon(message.platform)}
           </div>
-          {/* Removed redundant status icons - just show unread indicator if needed */}
-          {isUnread && (
-            <div className={`h-2 w-2 rounded-full ${
-              getPlatformDisplay(message.platform) === 'gmail' ? 'bg-red-500' : 
-              getPlatformDisplay(message.platform) === 'slack' ? 'bg-purple-500' : 'bg-green-500'
-            }`} />
-          )}
+          {/* Unread Dot REMOVED */}
         </div>
         
         <div className="flex-1 min-w-0">
@@ -274,16 +215,10 @@ export function MessageItem({ message, contact, showContact = true }: MessageIte
                   {contact.name}
                 </span>
               )}
+
+              {/* "NEEDS YOUR ATTENTION" Badge REMOVED */}
               
-              {/* Priority and AI badges */}
-              {isHighPriority && (
-                <Badge variant="destructive" className="text-xs">
-                  <AlertTriangle className="h-3 w-3 mr-1" />
-                  High Priority
-                </Badge>
-              )}
-              
-              {message.platformData?.category === 'meeting' && (
+              {currentMessagePlatformData?.category === 'meeting' && (
                 <Badge variant="outline" className="text-xs bg-blue-50 text-blue-700 border-blue-200">
                   <Calendar className="h-3 w-3 mr-1" />
                   Meeting
@@ -312,16 +247,16 @@ export function MessageItem({ message, contact, showContact = true }: MessageIte
           
           {/* Preview content - focus on AI summary */}
           <p className="text-sm text-gray-600 line-clamp-3 mb-2">
-            {displayContent.summary}
+            {displaySummary}
           </p>
 
           {/* AI Insights bar (if available and not expanded) */}
-          {!expanded && isAIEnhanced && displayContent.actionItems.length > 0 && (
+          {!expanded && isAIEnhanced && hasActionItems && (
             <div className="inline-flex items-center gap-2 text-xs bg-amber-50 rounded-lg p-2 mt-2 border border-amber-200 w-auto">
               <Zap className="h-3 w-3 text-amber-600" />
               <span className="text-amber-700 font-medium">AI detected:</span>
               <Badge variant="outline" className="bg-orange-50 text-orange-700 border-orange-200">
-                {displayContent.actionItems.length} actions needed
+                {realActionItems.length} {realActionItems.length === 1 ? 'action' : 'actions'} needed
               </Badge>
             </div>
           )}
@@ -341,17 +276,17 @@ export function MessageItem({ message, contact, showContact = true }: MessageIte
       {expanded && (
         <div className="px-4 pb-4 border-t pt-4 bg-muted/30">
           {/* AI Insights - Show key points and action items directly */}
-          {isAIEnhanced && (displayContent.keyPoints.length > 0 || displayContent.actionItems.length > 0) && (
+          {isAIEnhanced && (displayKeyPoints.length > 0 || realActionItems.length > 0) && (
             <div className="mb-4 space-y-3 bg-slate-50 p-4 rounded-lg border border-slate-200">
               {/* Key Points */}
-              {displayContent.keyPoints.length > 0 && (
+              {displayKeyPoints.length > 0 && (
                 <div>
                   <h4 className="text-xs font-medium text-slate-700 mb-2 flex items-center gap-1">
                     <CheckCircle className="h-3 w-3" />
                     Key Points
                   </h4>
                   <ul className="text-sm text-slate-600 space-y-1">
-                    {displayContent.keyPoints.map((point: string, index: number) => (
+                    {displayKeyPoints.map((point: string, index: number) => (
                       <li key={index} className="flex items-start gap-2">
                         <span className="w-1.5 h-1.5 bg-slate-400 rounded-full mt-1.5 flex-shrink-0"></span>
                         <span>{point}</span>
@@ -362,19 +297,26 @@ export function MessageItem({ message, contact, showContact = true }: MessageIte
               )}
               
               {/* Action Items */}
-              {displayContent.actionItems.length > 0 && (
+              {realActionItems.length > 0 && (
                 <div>
                   <h4 className="text-xs font-medium text-amber-700 mb-2 flex items-center gap-1">
                     <AlertTriangle className="h-3 w-3 text-amber-600" />
                     Action Items
                   </h4>
                   <ul className="text-sm text-amber-700 space-y-1">
-                    {displayContent.actionItems.map((action: string, index: number) => (
-                      <li key={index} className="flex items-start gap-2">
-                        <span className="w-1.5 h-1.5 bg-amber-500 rounded-full mt-1.5 flex-shrink-0"></span>
-                        <span className="font-medium">{action}</span>
-                      </li>
-                    ))}
+                    {displayActionItems.map((actionOrObject: string | SuggestedAction, index: number) => {
+                      const actionTitle = typeof actionOrObject === 'string' ? actionOrObject : actionOrObject.title;
+                      const actionKey = typeof actionOrObject === 'string' ? `str-action-${index}` : (actionOrObject.id || `sa-action-${index}`);
+                      // Filter out "no action" type items directly in the map for cleaner rendering
+                      if (typeof actionOrObject !== 'string' && actionOrObject.type === 'no-action') return null;
+                      if (actionTitle.toLowerCase() === 'no action required' || actionTitle.toLowerCase() === 'no action needed' || actionTitle.toLowerCase().includes('no action')) return null;
+                      return (
+                        <li key={actionKey} className="flex items-start gap-2">
+                          <span className="w-1.5 h-1.5 bg-amber-500 rounded-full mt-1.5 flex-shrink-0"></span>
+                          <span className="font-medium">{actionTitle}</span>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               )}
@@ -388,34 +330,54 @@ export function MessageItem({ message, contact, showContact = true }: MessageIte
             <details className="mt-4 bg-gray-50 rounded-lg p-3 border">
               <summary className="cursor-pointer text-xs font-medium text-gray-600 hover:text-gray-800">
                 {message.threadCount && message.threadCount > 1 
-                  ? `View Full Thread (${message.threadCount} messages)`
+                  ? `View Thread Details (${message.threadCount} messages total)`
                   : 'View Original Content'
                 }
               </summary>
               <div className="mt-3 space-y-3 max-h-96 overflow-y-auto">
-                {message.threadCount && message.threadCount > 1 && message.threadMessages ? (
-                  // Show chronological thread conversation
-                  message.threadMessages
-                    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()) // Oldest first for conversation flow
-                    .map((threadMsg, index) => {
-                      const isLatest = index === message.threadMessages!.length - 1
-                      return (
-                        <div key={threadMsg.id} className="border-l-2 border-gray-300 pl-3 pb-3">
-                          <div className="text-xs text-gray-500 mb-1">
-                            <strong>{threadMsg.contact?.fullName || 'Unknown'}</strong> • {' '}
-                            {formatDistanceToNow(new Date(threadMsg.timestamp), { addSuffix: true })}
-                            {isLatest && ' (latest)'}
+                {message.threadCount && message.threadCount > 1 ? (
+                  message.threadMessages && message.threadMessages.length > 0 ? (
+                    // Show chronological thread conversation for small threads
+                    message.threadMessages
+                      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()) // Oldest first for conversation flow
+                      .map((threadMsg, index) => {
+                        const isLatest = index === message.threadMessages!.length - 1;
+                        // const threadMsgPlatformData = threadMsg.platformData as MessagePlatformData | undefined; // Not needed if only showing content
+                        return (
+                          <div key={threadMsg.id} className="border-l-2 border-gray-300 pl-3 pb-3">
+                            <div className="text-xs text-gray-500 mb-1">
+                              <strong>{threadMsg.contact?.fullName || (threadMsg.platformData as MessagePlatformData)?.from || 'Unknown'}</strong> • {' '}
+                              {formatDistanceToNow(new Date(threadMsg.timestamp), { addSuffix: true })}
+                              {isLatest && ' (latest)'}
+                            </div>
+                            <div className="text-sm text-gray-700 whitespace-pre-wrap bg-white rounded p-2 border">
+                              {threadMsg.content} {/* <<< Ensure this ONLY shows raw content */}
+                            </div>
                           </div>
-                          <div className="text-sm text-gray-700 whitespace-pre-wrap bg-white rounded p-2 border">
-                            {threadMsg.platformData?.aiSummary || threadMsg.content}
-                          </div>
+                        );
+                      })
+                  ) : (
+                    // Large thread with AI summary only
+                    <div className="text-sm text-gray-600 bg-blue-50 rounded p-3 border border-blue-200">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Mail className="h-4 w-4 text-blue-600" />
+                        <span className="font-medium text-blue-800">Large Thread ({message.threadCount} messages)</span>
+                      </div>
+                      <p className="text-blue-700">
+                        This is a large email thread with {message.threadCount} messages. 
+                        The AI has analyzed the entire conversation and provided the summary above.
+                      </p>
+                      {analysisFromPlatformData && (
+                        <div className="mt-2 text-xs text-blue-600">
+                          ✨ AI has processed the full thread for key insights and action items
                         </div>
-                      )
-                    })
+                      )}
+                    </div>
+                  )
                 ) : (
-                  // Show original content
+                  // Show original content for single messages
                   <div className="text-sm text-gray-700 whitespace-pre-wrap bg-white rounded p-3 border">
-                    {message.platformData?.originalContent || message.content}
+                    {currentMessagePlatformData?.originalContent || message.content}
                   </div>
                 )}
               </div>

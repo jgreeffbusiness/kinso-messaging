@@ -1,10 +1,10 @@
-import { google } from 'googleapis'
+import { google, Auth as GoogleAuth } from 'googleapis'
 import { prisma } from '@server/db'
 import type { User } from '@prisma/client'
-import { processEmailContent } from '@/lib/email-processor'
+import { Prisma } from '@prisma/client'
 
 // Create a single function to handle OAuth client creation with auto-refresh capability
-const createOAuth2ClientWithAutoRefresh = (user: User) => {
+const createOAuth2ClientWithAutoRefresh = (user: User): GoogleAuth.OAuth2Client => {
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
@@ -20,26 +20,14 @@ const createOAuth2ClientWithAutoRefresh = (user: User) => {
   
   // Add token refresh handler
   oauth2Client.on('tokens', async (tokens) => {
-    if (tokens.refresh_token) {
-      // Only update if we got a new refresh token
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          googleAccessToken: tokens.access_token,
-          googleRefreshToken: tokens.refresh_token,
-          googleTokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined
-        }
-      })
-    } else if (tokens.access_token) {
-      // Just update the access token and expiry
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          googleAccessToken: tokens.access_token,
-          googleTokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined
-        }
-      })
+    const updateData: Prisma.UserUpdateInput = {
+      googleAccessToken: tokens.access_token,
+      googleTokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined
     }
+    if (tokens.refresh_token) {
+      updateData.googleRefreshToken = tokens.refresh_token
+    }
+    await prisma.user.update({ where: { id: user.id }, data: updateData })
     console.log(`Refreshed Google token for user ${user.id}`)
   })
   
@@ -50,7 +38,7 @@ const createOAuth2ClientWithAutoRefresh = (user: User) => {
 export const getOAuth2Client = createOAuth2ClientWithAutoRefresh
 
 // Manual refresh function (for cases where auto-refresh fails)
-export async function manuallyRefreshGoogleToken(user: User) {
+export async function manuallyRefreshGoogleToken(user: User): Promise<User> {
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
@@ -63,13 +51,14 @@ export async function manuallyRefreshGoogleToken(user: User) {
   
   try {
     const { credentials } = await oauth2Client.refreshAccessToken()
+    const expiryDate = credentials.expiry_date ? new Date(credentials.expiry_date) : null
     
     // Update user in database with new tokens
     return await prisma.user.update({
       where: { id: user.id },
       data: {
         googleAccessToken: credentials.access_token,
-        googleTokenExpiry: new Date(credentials.expiry_date)
+        googleTokenExpiry: expiryDate
       }
     })
   } catch (error) {
@@ -82,7 +71,7 @@ export async function manuallyRefreshGoogleToken(user: User) {
         googleAccessToken: null,
         googleRefreshToken: null,
         googleTokenExpiry: null,
-        googleIntegrations: null
+        googleIntegrations: Prisma.JsonNull
       }
     })
     
@@ -90,272 +79,196 @@ export async function manuallyRefreshGoogleToken(user: User) {
   }
 }
 
-export async function syncContactEmails(userId: string, contactId: string) {
-  try {
-    const user = await prisma.user.findUnique({ 
-      where: { id: userId } 
-    })
+// This function is intended to be robust with token refresh for its internal API calls.
+export async function syncContactEmails(user: User, contactId: string, initialOAuth2Client: GoogleAuth.OAuth2Client): Promise<{
+  success: boolean;
+  count: number;
+  error?: string;
+}> {
+  let oauth2Client = initialOAuth2Client;
+  let gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+  const contact = await prisma.contact.findUnique({ where: { id: contactId, userId: user.id } });
 
-    if (!user?.googleAccessToken) {
-      return { success: false, error: 'Google authentication expired. Please reconnect your account.' }
-    }
-    
-    const contact = await prisma.contact.findUnique({
-      where: { id: contactId, userId }
-    })
-    
-    if (!contact || !contact.email) {
-      throw new Error('Contact has no email')
-    }
-    
-    const oauth2Client = getOAuth2Client(user)
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client })
-    
-    // Correct search query format for Gmail API
-    const searchQuery = contact.email ? 
-      `from:${contact.email.trim()} OR to:${contact.email.trim()}` : 
-      ''
-    
-    // Log the query for debugging
-    console.log(`Search query for ${contact.id}: ${searchQuery}`)
-    
-    // Skip if no email to search for
-    if (!contact.email || contact.email.trim() === '') {
-      console.log(`Skipping contact ${contact.id}, no valid email address`)
-      return { success: true, count: 0 }
-    }
-    
-    try {
-      console.log(`Searching Gmail with query: ${searchQuery}`)
-      const response = await gmail.users.messages.list({
-        userId: 'me',
-        q: searchQuery,
-        maxResults: 100
-      })
-      console.log(response)
-      
-      if (!response.data.messages || response.data.messages.length === 0) {
-        console.log(`No messages found for contact ${contact.id}`)
-        return { success: true, count: 0 }
-      }
-      
-      console.log(`Found ${response.data.messages.length} messages for contact ${contact.id}`)
-      
-      let importedCount = 0
-      
-      // Process each message
-      for (const { id: gmailId } of response.data.messages) {
-        // Check if we already have this message
-        const existingMessage = await prisma.message.findFirst({
-          where: { 
-            userId, 
-            contactId,
-            platform: 'gmail',
-            platformMessageId: gmailId as string
+  if (!contact || !contact.email) {
+    return { success: false, count: 0, error: "Contact or email missing for syncContactEmails" };
+  }
+  console.log(`[syncContactEmails] Syncing for contact ${contact.email} (ID: ${contactId}) for user ${user.id}`);
+  const searchQuery = `from:${contact.email.trim()} OR to:${contact.email.trim()}`;
+  let messagesProcessedThisContact = 0;
+
+  try {
+    const listResponse = await gmail.users.messages.list({ userId: 'me', q: searchQuery, maxResults: 50 });
+    const messagesToList = listResponse.data.messages || [];
+
+    for (const listedMessage of messagesToList) {
+      if (!listedMessage.id) continue;
+      const gmailId = listedMessage.id;
+
+      // Check if already processed (optional, based on your Message model)
+      const existingMessage = await prisma.message.findFirst({
+        where: { userId: user.id, platformMessageId: gmailId, platform: 'email' /* or 'gmail' */ }
+      });
+      if (existingMessage) continue;
+
+      try {
+        const messageDetails = await gmail.users.messages.get({ userId: 'me', id: gmailId, format: 'full' });
+        console.log(`   Processing message ${gmailId} for contact ${contact.email}. Details:`, messageDetails.data);
+        messagesProcessedThisContact++;
+
+      } catch (msgGetError: unknown) {
+        const mgErr = msgGetError as { code?: number; message?: string };
+        if (mgErr.code === 401 || mgErr.message?.includes('invalid_grant') || mgErr.message?.includes('Token has been expired')) {
+          console.log(`Auth error getting message ${gmailId} for ${contact.email}. Refreshing token for user ${user.id}.`);
+          try {
+            const refreshedUser = await manuallyRefreshGoogleToken(user);
+            user = refreshedUser;
+            oauth2Client = getOAuth2Client(refreshedUser);
+            gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+            console.log('Retrying messages.get after refresh...');
+            const refreshedMessageDetails = await gmail.users.messages.get({ userId: 'me', id: gmailId, format: 'full' });
+            console.log(`   Processing message ${gmailId} for contact ${contact.email} (after refresh). Details:`, refreshedMessageDetails.data);
+            messagesProcessedThisContact++;
+          } catch (nestedRefreshError: unknown) {
+            const nrErr = nestedRefreshError as Error;
+            console.error(`Failed to refresh token or retry messages.get for ${gmailId}: ${nrErr.message}`);
+            break; 
           }
-        })
-        
-        if (existingMessage) continue
-        
-        // Get full message details
-        const messageDetails = await gmail.users.messages.get({
-          userId: 'me',
-          id: gmailId
-        })
-        
-        const headers = messageDetails.data.payload.headers
-        const subject = headers.find(h => h.name === 'Subject')?.value || '(No subject)'
-        const timestamp = new Date(parseInt(messageDetails.data.internalDate))
-        
-        // Determine direction (inbound/outbound)
-        const from = headers.find(h => h.name === 'From')?.value || ''
-        const direction = from.includes(contact.email) ? 'inbound' : 'outbound'
-        
-        // Extract message content directly
-        const rawMessageContent = extractEmailContent(messageDetails)
-        
-        // Process email with AI to clean content and extract insights
-        let processedEmail = null
-        let finalContent = rawMessageContent
-        let enhancedPlatformData = {
-          subject,
-          direction,
-          from,
-          to: headers.find(h => h.name === 'To')?.value?.split(',').map(e => e.trim()) || [],
-          cc: headers.find(h => h.name === 'Cc')?.value?.split(',').map(e => e.trim()) || [],
-          labels: messageDetails.data.labelIds || [],
-          threadId: messageDetails.data.threadId
-        }
-        
-        try {
-          processedEmail = await processEmailContent(rawMessageContent)
-          finalContent = processedEmail.cleanedContent
-          enhancedPlatformData = {
-            ...enhancedPlatformData,
-            aiSummary: processedEmail.summary,
-            keyPoints: processedEmail.keyPoints,
-            actionItems: processedEmail.actionItems,
-            urgency: processedEmail.urgency,
-            category: processedEmail.category,
-            originalContent: processedEmail.originalContent
-          }
-          console.log(`AI processed email for contact ${contact.id}`)
-        } catch (aiError) {
-          console.error(`AI processing failed for message ${gmailId}, using raw content:`, aiError)
-          // Continue with raw content if AI processing fails
-        }
-        
-        // Store in database with cleaned content and AI insights
-        await prisma.message.create({
-          data: {
-            userId,
-            contactId,
-            platform: 'email', // Will display as 'gmail' in UI
-            platformMessageId: gmailId as string,
-            content: finalContent, // Use cleaned content
-            timestamp,
-            platformData: enhancedPlatformData // Include AI insights
-          }
-        })
-        
-        // Also create thread reference for organizing emails
-        const threadId = messageDetails.data.threadId
-        
-        // Check for existing ContactMessage entries using both fields separately
-        const existingContactMessage = await prisma.contactMessage.findFirst({
-          where: {
-            messageId: gmailId as string,
-            contactId: contactId
-          }
-        })
-        
-        // Only create if this specific combination doesn't exist
-        if (!existingContactMessage) {
-          await prisma.contactMessage.create({
-            data: {
-              userId,
-              contactId,
-              messageId: gmailId as string,
-              threadId
-            }
-          })
-        }
-        
-        importedCount++
-      }
-      
-      return { success: true, count: importedCount }
-    } catch (error) {
-      console.error(`Gmail API error for contact ${contact.id}:`, error)
-      
-      // Check for token expiration
-      if (error.message?.includes('invalid_grant') || 
-          error.message?.includes('invalid_token') || 
-          error.status === 401 || 
-          error.status === 400) {
-        console.log('Token may have expired, attempting to refresh...')
-        
-        try {
-          // Refresh token and update user
-          const refreshedUser = await manuallyRefreshGoogleToken(user)
-          
-          // Retry the operation with updated user credentials
-          console.log('Token refreshed, retrying Gmail operation')
-          const oauth2Client = getOAuth2Client(refreshedUser)
-          const gmail = google.gmail({ version: 'v1', auth: oauth2Client })
-          
-          // Retry the same operation
-          const retryResponse = await gmail.users.messages.list({
-            userId: 'me',
-            q: searchQuery,
-            maxResults: 100
-          })
-          
-          // Continue with the rest of your code using retryResponse
-          // This will need to duplicate some logic from above
-        } catch (refreshError) {
-          console.error('Unable to refresh token, skipping contact:', refreshError)
-          return { 
-            success: false, 
-            error: 'Google authentication expired. Please reconnect your account.' 
-          }
+        } else {
+          console.error(`Error fetching message ${gmailId} for ${contact.email} (non-auth): ${mgErr.message}`);
         }
       }
-      
-      return { success: false, error: error.message }
     }
-  } catch (error) {
-    console.error('Error syncing emails:', error)
-    return { success: false, error: error.message }
+    return { success: true, count: messagesProcessedThisContact };
+
+  } catch (listError: unknown) {
+    const lErr = listError as { code?: number; message?: string };
+    console.error(`[syncContactEmails] Error listing messages for ${contact.email}: ${lErr.message}`);
+    return { success: false, count: 0, error: lErr.message };
   }
 }
 
-// Background job to sync all contacts' emails
 export async function syncAllUserEmails(userId: string) {
   try {
-    const user = await prisma.user.findUnique({ 
+    let user = await prisma.user.findUnique({ 
       where: { id: userId },
-      include: { contacts: true }
-    })
+      // Select all fields needed by getOAuth2Client and manuallyRefreshGoogleToken
+      select: { 
+        id: true, email: true, googleAccessToken: true, googleRefreshToken: true, googleTokenExpiry: true,
+        authId: true, authProvider: true, createdAt: true, googleIntegrations: true, 
+        name: true, photoUrl: true, slackAccessToken: true, slackIntegrations: true, 
+        slackRefreshToken: true, slackTeamId: true, slackTokenExpiry: true, slackUserId: true, updatedAt: true,
+        contacts: true // Include contacts for the loop
+      }
+    });
     
-    if (!user?.googleAccessToken) {
-      return { success: false, error: 'Google authentication expired. Please reconnect your account.' }
+    if (!user) {
+      console.error(`[syncAllUserEmails] User ${userId} not found.`);
+      return { success: false, error: 'User not found' };
     }
-    
-    const results = []
+
+    // Preemptive token check and refresh
+    if (!user.googleAccessToken || !user.googleRefreshToken || (user.googleTokenExpiry && new Date(user.googleTokenExpiry) < new Date())) {
+      if (user.googleRefreshToken) {
+        console.log(`[syncAllUserEmails] Attempting preemptive token refresh for user ${userId}`);
+        try {
+          const refreshedUser = await manuallyRefreshGoogleToken(user);
+          user = await prisma.user.findUnique({ where: { id: refreshedUser.id }, include: {contacts: true} }); // Re-fetch user with contacts
+          if (!user) throw new Error("User not found after refresh attempt.");
+          console.log(`[syncAllUserEmails] Token refreshed successfully for user ${userId}`);
+        } catch (refreshError: unknown) {
+          const e = refreshError as Error;
+          console.error(`[syncAllUserEmails] Preemptive token refresh failed for user ${userId}: ${e.message}`);
+          return { success: false, error: `Google token refresh failed: ${e.message}` };
+        }
+      } else {
+        console.log(`[syncAllUserEmails] Google not fully authenticated for user ${userId} (missing refresh token). Skipping sync.`);
+        return { success: false, error: 'Google not fully authenticated (no refresh token).' };
+      }
+    }
+    // At this point, user object should have valid tokens if refresh was successful
+    if (!user.googleAccessToken) { // Final check after potential refresh
+        return { success: false, error: 'Google access token still missing after refresh attempt.' };
+    }
+
+    const oauth2Client: GoogleAuth.OAuth2Client = getOAuth2Client(user); // Get client with potentially refreshed tokens
+    const results = [];
     
     for (const contact of user.contacts) {
       if (contact.email) {
-        const result = await syncContactEmails(userId, contact.id)
-        results.push({ contactId: contact.id, result })
+        // Pass the user object and the already initialized (and potentially refreshed) oauth2Client
+        const result = await syncContactEmails(user, contact.id, oauth2Client);
+        results.push({ contactId: contact.id, ...result }); // Spread result to include success/count/error
       }
     }
     
-    return { success: true, results }
-  } catch (error) {
-    console.error('Error in bulk sync:', error)
-    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+    return { success: true, results };
+  } catch (error: unknown) {
+    const e = error as Error;
+    console.error(`[syncAllUserEmails] Error in bulk sync for user ${userId}:`, e.message);
+    return { success: false, error: e.message || 'Unknown error' };
   }
 }
 
 // Helper function to extract email content
-export function extractEmailContent(message) {
-  // If plain text part exists, use that
-  const plainPart = findBodyPart(message.data.payload, 'text/plain')
-  if (plainPart) {
-    return Buffer.from(plainPart.body.data, 'base64').toString()
-  }
+export function extractEmailContent(message: { data: GmailMessageData }): string {
+  const payload = message.data.payload;
+  if (!payload) return 'No payload';
   
-  // Otherwise use HTML part (and maybe strip HTML tags)
-  const htmlPart = findBodyPart(message.data.payload, 'text/html')
-  if (htmlPart) {
-    const htmlContent = Buffer.from(htmlPart.body.data, 'base64').toString()
-    // Optional: strip HTML tags for cleaner display
-    return stripHtmlTags(htmlContent)
+  const plainPart = findBodyPart(payload, 'text/plain');
+  if (plainPart?.body?.data) return Buffer.from(plainPart.body.data, 'base64').toString();
+  
+  const htmlPart = findBodyPart(payload, 'text/html');
+  if (htmlPart?.body?.data) {
+    const htmlContent = Buffer.from(htmlPart.body.data, 'base64').toString();
+    return stripHtmlTags(htmlContent);
   }
   
   return 'No content'
 }
 
 // Helper to find body parts
-export function findBodyPart(part, mimeType) {
-  if (!part) return null
+export function findBodyPart(part: EmailPayloadPart | EmailPayload | null, mimeType: string): EmailPayloadPart | null {
+  if (!part) return null;
   
-  if (part.mimeType === mimeType) {
-    return part
+  if ((part as EmailPayload).mimeType === mimeType && 'body' in part && (part as EmailPayloadPart).body?.data) {
+    return part as EmailPayloadPart;
+  }
+  
+  if ((part as EmailPayloadPart).mimeType === mimeType && (part as EmailPayloadPart).body?.data) {
+    return part as EmailPayloadPart;
   }
   
   if (part.parts) {
     for (const subPart of part.parts) {
-      const found = findBodyPart(subPart, mimeType)
-      if (found) return found
+      const found = findBodyPart(subPart, mimeType);
+      if (found) return found;
     }
   }
   
-  return null
+  return null;
 }
 
 // Helper function to strip HTML tags
-function stripHtmlTags(html) {
-  return html.replace(/<[^>]+>/g, '')
+function stripHtmlTags(html: string): string {
+  return html.replace(/<[^>]+>/g, '');
+}
+
+// Type helper functions for email content processing
+interface EmailPayloadPart {
+  mimeType?: string | null;
+  body?: { data?: string | null } | null;
+  parts?: EmailPayloadPart[] | null;
+}
+interface EmailPayload {
+  headers?: Array<{ name?: string | null; value?: string | null }> | null;
+  body?: { data?: string | null } | null;
+  parts?: EmailPayloadPart[] | null;
+  mimeType?: string | null;
+}
+interface GmailMessageData { // More specific type for message.data
+  payload?: EmailPayload | null;
+  internalDate?: string | null;
+  labelIds?: string[] | null;
+  threadId?: string | null;
+  id?: string | null;
 } 

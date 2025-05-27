@@ -1,9 +1,9 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import useMessages from '@hooks/useMessages'
-import { useThreadedMessages } from '@hooks/useThreadedMessages'
-import { useSelectedMessage } from '@providers/SelectedMessageProvider'
+import { useThreadedMessages, EnhancedMessage, Message } from '@hooks/useThreadedMessages'
+import { useActiveFocus } from '@providers/ActiveFocusProvider'
 import SharedLayout from '@components/layout/SharedLayout'
 import { Input } from '@components/ui/input'
 import { Button } from '@components/ui/button'
@@ -24,6 +24,7 @@ import {
   SelectValue 
 } from '@components/ui/select'
 import MessageItem from '@components/MessageItem'
+import { useAuth } from '@/components/AuthProvider'
 
 interface AutoSyncStatus {
   autoSyncEnabled: boolean
@@ -40,7 +41,7 @@ interface AutoSyncStatus {
 }
 
 export default function MessagesPage() {
-  const { setSelectedMessageId } = useSelectedMessage()
+  const { setActiveItem, setSelectedMessageId } = useActiveFocus()
   const [autoSyncStatus, setAutoSyncStatus] = useState<AutoSyncStatus>({
     autoSyncEnabled: false,
     currentlySyncing: false
@@ -59,20 +60,23 @@ export default function MessagesPage() {
     refreshMessages
   } = useMessages()
 
-  const deduplicatedMessages = useThreadedMessages((messages || []) as Parameters<typeof useThreadedMessages>[0])
+  const { user } = useAuth()
+  const currentUserSlackId = user?.slackUserId
+
+  const deduplicatedMessages: EnhancedMessage[] = useThreadedMessages((messages || []) as Message[], currentUserSlackId)
 
   // Filter messages by read/unread status
   const filteredMessages = showUnreadOnly 
-    ? [] // For now, show no messages when unread filter is on
+    ? deduplicatedMessages.filter(m => !m.readAt)
     : deduplicatedMessages
 
   // Get unread count
-  const unreadCount = 0 // Temporarily set to 0 until we fix the type
+  const unreadCount = useMemo(() => deduplicatedMessages.filter(m => !m.readAt).length, [deduplicatedMessages])
 
   // Fetch auto-sync status
   useEffect(() => {
     fetchAutoSyncStatus()
-    const interval = setInterval(fetchAutoSyncStatus, 5 * 60 * 1000) // Update every 5 minutes instead of 30 seconds
+    const interval = setInterval(fetchAutoSyncStatus, 5 * 60 * 1000)
     return () => clearInterval(interval)
   }, [])
 
@@ -252,11 +256,12 @@ export default function MessagesPage() {
 
   // Handle message click - set as selected
   const handleMessageClick = (messageId: string) => {
-    setSelectedMessageId(messageId)
-    // Auto-mark as read when clicked
-    const message = deduplicatedMessages.find(m => m.id === messageId)
-    if (message && !message.readAt) {
-      markMessagesAsRead([messageId], true)
+    const message = deduplicatedMessages.find(m => m.id === messageId);
+    if (message) {
+      setActiveItem({ type: 'message', data: message });
+      if (!message.readAt) {
+        markMessagesAsRead([messageId], true);
+      }
     }
   }
 
@@ -386,16 +391,7 @@ export default function MessagesPage() {
                     onClick={() => handleMessageClick(message.id)}
                   >
                     <MessageItem 
-                      message={{
-                        id: message.id,
-                        platform: message.platform,
-                        content: message.content,
-                        timestamp: new Date(message.timestamp),
-                        threadCount: message.threadCount,
-                        threadMessages: message.threadMessages,
-                        platformData: message.platformData,
-                        readAt: message.readAt
-                      }}
+                      message={message}
                       contact={{
                         id: message.contact?.id || '',
                         name: message.displayName,

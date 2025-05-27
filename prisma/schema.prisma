@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -14,64 +8,66 @@ datasource db {
 }
 
 model User {
-  id                 String         @id @default(cuid())
-  authId             String         @unique // Generic external auth ID
-  authProvider       String? // "firebase", "auth0", etc.
+  id                 String                   @id @default(cuid())
   email              String?
-  name               String?
-  photoUrl           String?
+  authId             String                   @unique
+  authProvider       String?
+  createdAt          DateTime                 @default(now())
   googleAccessToken  String?
+  googleIntegrations Json?
   googleRefreshToken String?
   googleTokenExpiry  DateTime?
-  googleIntegrations Json?
+  name               String?
+  photoUrl           String?
   slackAccessToken   String?
-  slackRefreshToken  String?
-  slackTokenExpiry   DateTime?
-  slackTeamId        String?
-  slackUserId        String?
   slackIntegrations  Json?
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  slackRefreshToken  String?
+  slackTeamId        String?
+  slackTokenExpiry   DateTime?
+  slackUserId        String?
+  updatedAt          DateTime                 @updatedAt
+  blacklistedSenders BlacklistedSender[]
   contacts           Contact[]
-  messages           Message[]
   contactMessages    ContactMessage[]
+  messages           Message[]
   notes              Note[]
   pendingApprovals   PendingContactApproval[]
-  blacklistedSenders BlacklistedSender[]
 }
 
 model Contact {
-  id              String         @id @default(cuid())
-  user            User           @relation(fields: [userId], references: [id])
+  id              String           @id @default(cuid())
   userId          String
   fullName        String
   email           String?
+  createdAt       DateTime         @default(now())
+  googleContactId String?          @unique
+  googleId        String?          @unique
+  phone           String?
   phoneNumber     String?
   photoUrl        String?
-  googleContactId String?        @unique
-  messages        Message[]
-  googleId        String?        @unique
-  phone           String?
-  source          String? // "google", "manual", etc.
-  platformData    Json?          // Cross-platform identity information
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  platformData    Json?
+  source          String?
+  updatedAt       DateTime         @updatedAt
+  user            User             @relation(fields: [userId], references: [id])
   contactMessages ContactMessage[]
+  messages        Message[]
   notes           Note[]
 }
 
 model Message {
-  id                String   @id @default(cuid())
-  user              User     @relation(fields: [userId], references: [id])
+  id                String    @id @default(cuid())
   userId            String
-  contact           Contact  @relation(fields: [contactId], references: [id])
   contactId         String
   platform          String
+  timestamp         DateTime  // External platform's original message timestamp
+  content           String
   platformData      Json?
   platformMessageId String
-  timestamp         DateTime
-  content           String
   readAt            DateTime?
+  createdAt         DateTime  @default(now()) // Timestamp for when record is created in our DB
+  updatedAt         DateTime  @updatedAt      // Timestamp for when record is updated in our DB
+  contact           Contact   @relation(fields: [contactId], references: [id])
+  user              User      @relation(fields: [userId], references: [id])
   summary           Summary?
 }
 
@@ -84,16 +80,14 @@ model Summary {
 }
 
 model ContactMessage {
-  id         String   @id @default(cuid())
-  userId     String
-  contactId  String
-  messageId  String
-  threadId   String
-  createdAt  DateTime @default(now())
-
-  // Relations
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        String   @id @default(cuid())
+  userId    String
+  contactId String
+  messageId String
+  threadId  String
+  createdAt DateTime @default(now())
   contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([messageId, contactId])
   @@index([userId])
@@ -108,10 +102,8 @@ model Note {
   userId    String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
-  // Relations
-  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([contactId])
   @@index([userId])
@@ -129,8 +121,6 @@ model PendingContactApproval {
   lastMessageDate  DateTime
   previewContent   String?
   createdAt        DateTime         @default(now())
-
-  // Relations
   user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages         PendingMessage[]
 
@@ -139,15 +129,13 @@ model PendingContactApproval {
 }
 
 model PendingMessage {
-  id                  String                  @id @default(cuid())
-  pendingApprovalId   String
-  content             String
-  timestamp           DateTime
-  platformMessageId   String
-  createdAt           DateTime                @default(now())
-
-  // Relations
-  pendingApproval     PendingContactApproval  @relation(fields: [pendingApprovalId], references: [id], onDelete: Cascade)
+  id                String                 @id @default(cuid())
+  pendingApprovalId String
+  content           String
+  timestamp         DateTime
+  platformMessageId String
+  createdAt         DateTime               @default(now())
+  pendingApproval   PendingContactApproval @relation(fields: [pendingApprovalId], references: [id], onDelete: Cascade)
 
   @@index([pendingApprovalId])
 }
@@ -161,12 +149,10 @@ model BlacklistedSender {
   senderHandle String?
   reason       String?
   createdAt    DateTime @default(now())
-
-  // Relations
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
-  @@index([platform])
   @@unique([userId, platform, senderEmail])
   @@unique([userId, platform, senderHandle])
+  @@index([userId])
+  @@index([platform])
 }

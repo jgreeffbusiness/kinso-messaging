@@ -1,11 +1,10 @@
 import { unifiedMessageSyncService } from './unified-message-sync-service'
 import { prisma } from '@/server/db'
 
-interface AutoSyncConfig {
-  enabled: boolean
-  intervalMinutes: number
-  platforms: string[]
-  lastSync?: Date
+interface InitialSyncConfig {
+  platforms?: string[]
+  forceSync?: boolean // Force external API calls
+  maxStaleness?: number // Max age before considering data stale
 }
 
 interface SyncResult {
@@ -24,198 +23,246 @@ interface SyncResult {
   errors: string[]
 }
 
+interface CachedSyncStatus {
+  syncType: 'cached' | 'fresh' | 'stale'
+  lastSync: Date | null
+  dataAge: number // in milliseconds
+  platforms: Array<{
+    platform: string
+    contactCount: number
+    messageCount: number
+    lastActivity: Date | null
+  }>
+  totalContacts: number
+  totalMessages: number
+}
+
 export class AutoSyncService {
-  private syncIntervals = new Map<string, NodeJS.Timeout>()
   private isSyncing = new Map<string, boolean>()
   private lastSyncTime = new Map<string, number>()
   
-  private readonly MIN_SYNC_INTERVAL = 10 * 60 * 1000 // 10 minutes minimum between syncs
+  // Smart sync thresholds
+  private readonly FRESH_DATA_THRESHOLD = 4 * 60 * 60 * 1000 // 4 hours - data is "fresh"
+  private readonly STALE_DATA_THRESHOLD = 24 * 60 * 60 * 1000 // 24 hours - data is "stale"
+  private readonly MIN_FORCE_SYNC_INTERVAL = 5 * 60 * 1000 // 5 minutes between forced syncs
 
   /**
-   * Start automatic syncing for a user
+   * Get current status with cached data - fast, no external API calls
    */
-  async startAutoSync(userId: string, config?: Partial<AutoSyncConfig>) {
-    const defaultConfig: AutoSyncConfig = {
-      enabled: true,
-      intervalMinutes: 15, // Increased from 5 to 15 minutes to reduce rate limiting
-      platforms: ['slack', 'gmail'],
-      ...config
-    }
+  async getCachedStatus(userId: string): Promise<CachedSyncStatus> {
+    const lastSyncTime = this.lastSyncTime.get(userId)
+    const lastSync = lastSyncTime ? new Date(lastSyncTime) : null
+    const dataAge = lastSyncTime ? Date.now() - lastSyncTime : Infinity
 
-    // Stop existing sync if running
-    this.stopAutoSync(userId)
+    // Get counts from database (cached data)
+    const [contacts, messages] = await Promise.all([
+      prisma.contact.findMany({
+        where: { userId },
+        select: { 
+          id: true, 
+          platformData: true,
+          updatedAt: true
+        }
+      }),
+      prisma.message.findMany({
+        where: { userId },
+        select: { 
+          id: true, 
+          platform: true,
+          timestamp: true
+        }
+      })
+    ])
 
-    if (!defaultConfig.enabled) return
+    // Group by platform
+    const platformStats = ['slack', 'gmail'].map(platform => {
+      const platformContacts = contacts.filter(c => {
+        const platformData = c.platformData as Record<string, unknown>
+        return platformData && platformData[platform]
+      })
+      
+      const platformMessages = messages.filter(m => 
+        m.platform === platform || (platform === 'gmail' && m.platform === 'email')
+      )
 
-    console.log(`Starting auto-sync for user ${userId} every ${defaultConfig.intervalMinutes} minutes`)
+      const lastActivity = platformMessages.length > 0 
+        ? new Date(Math.max(...platformMessages.map(m => m.timestamp.getTime())))
+        : null
 
-    // Set up periodic sync
-    const interval = setInterval(async () => {
-      await this.performAutoSync(userId, defaultConfig.platforms)
-    }, defaultConfig.intervalMinutes * 60 * 1000)
+      return {
+        platform,
+        contactCount: platformContacts.length,
+        messageCount: platformMessages.length,
+        lastActivity
+      }
+    })
 
-    this.syncIntervals.set(userId, interval)
+    const syncType: 'cached' | 'fresh' | 'stale' = 
+      dataAge === Infinity ? 'cached' :
+      dataAge < this.FRESH_DATA_THRESHOLD ? 'fresh' :
+      dataAge < this.STALE_DATA_THRESHOLD ? 'cached' : 'stale'
 
-    // Perform initial sync only if enough time has passed
-    const lastSync = this.lastSyncTime.get(userId) || 0
-    const timeSinceLastSync = Date.now() - lastSync
-    
-    if (timeSinceLastSync > this.MIN_SYNC_INTERVAL) {
-      // Add a small delay to avoid immediate collision with other syncs
-      setTimeout(() => {
-        this.performAutoSync(userId, defaultConfig.platforms)
-      }, 5000) // 5 second delay
-    } else {
-      console.log(`Skipping initial sync for user ${userId} - last sync was ${timeSinceLastSync}ms ago`)
+    return {
+      syncType,
+      lastSync,
+      dataAge,
+      platforms: platformStats,
+      totalContacts: contacts.length,
+      totalMessages: messages.length
     }
   }
 
   /**
-   * Stop automatic syncing for a user
+   * Determine if we should sync from external APIs
    */
-  stopAutoSync(userId: string) {
-    const interval = this.syncIntervals.get(userId)
-    if (interval) {
-      clearInterval(interval)
-      this.syncIntervals.delete(userId)
-      this.isSyncing.delete(userId)
-      console.log(`Stopped auto-sync for user ${userId}`)
-    }
-  }
+  async shouldSyncExternally(userId: string, config?: InitialSyncConfig): Promise<{
+    shouldSync: boolean
+    reason: string
+    platforms: string[]
+  }> {
+    const { forceSync = false, maxStaleness = this.STALE_DATA_THRESHOLD } = config || {}
 
-  /**
-   * Perform sync for a user (called automatically)
-   */
-  private async performAutoSync(userId: string, platforms: string[]) {
-    // Prevent concurrent syncs for same user
+    // Always skip if force sync was recent
+    if (forceSync) {
+      const timeSinceLastSync = this.timeSinceLastSync(userId)
+      if (timeSinceLastSync < this.MIN_FORCE_SYNC_INTERVAL) {
+        return {
+          shouldSync: false,
+          reason: `Force sync blocked - only ${timeSinceLastSync}ms since last sync`,
+          platforms: []
+        }
+      }
+    }
+
+    // Check if currently syncing
     if (this.isSyncing.get(userId)) {
-      console.log(`Sync already in progress for user ${userId}, skipping`)
-      return
+      return {
+        shouldSync: false,
+        reason: 'Sync already in progress',
+        platforms: []
+      }
     }
 
-    // Check if minimum time has passed since last sync
-    const timeSinceLastSync = this.timeSinceLastSync(userId)
-    if (timeSinceLastSync < this.MIN_SYNC_INTERVAL) {
-      console.log(`Skipping sync for user ${userId} - only ${timeSinceLastSync}ms since last sync`)
-      return
+    const cachedStatus = await this.getCachedStatus(userId)
+    
+    // If forced, sync all valid platforms
+    if (forceSync) {
+      const validPlatforms = await this.getValidPlatforms(userId)
+      return {
+        shouldSync: validPlatforms.length > 0,
+        reason: 'Manual sync requested',
+        platforms: validPlatforms
+      }
+    }
+
+    // If no data exists, do initial sync
+    if (cachedStatus.totalContacts === 0 && cachedStatus.totalMessages === 0) {
+      const validPlatforms = await this.getValidPlatforms(userId)
+      return {
+        shouldSync: validPlatforms.length > 0,
+        reason: 'No cached data - initial sync needed',
+        platforms: validPlatforms
+      }
+    }
+
+    // If data is stale, suggest sync
+    if (cachedStatus.dataAge > maxStaleness) {
+      const validPlatforms = await this.getValidPlatforms(userId)
+      return {
+        shouldSync: validPlatforms.length > 0,
+        reason: `Data is stale (${Math.round(cachedStatus.dataAge / (1000 * 60 * 60))} hours old)`,
+        platforms: validPlatforms
+      }
+    }
+
+    // Otherwise, use cached data
+    return {
+      shouldSync: false,
+      reason: `Using cached data (${Math.round(cachedStatus.dataAge / (1000 * 60))} minutes old)`,
+      platforms: []
+    }
+  }
+
+  /**
+   * Get valid platforms for a user (without triggering API calls)
+   */
+  private async getValidPlatforms(userId: string): Promise<string[]> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        googleAccessToken: true,
+        googleTokenExpiry: true,
+        googleIntegrations: true,
+        slackAccessToken: true,
+      }
+    })
+
+    if (!user) return []
+
+    const validPlatforms: string[] = []
+    
+    // Check Gmail
+    if (user.googleAccessToken && 
+        user.googleTokenExpiry && 
+        user.googleTokenExpiry > new Date() &&
+        user.googleIntegrations && 
+        typeof user.googleIntegrations === 'object' &&
+        !Array.isArray(user.googleIntegrations) &&
+        'gmail' in user.googleIntegrations &&
+        user.googleIntegrations.gmail === true) {
+      validPlatforms.push('gmail')
+    }
+    
+    // Check Slack
+    if (user.slackAccessToken) {
+      validPlatforms.push('slack')
+    }
+
+    return validPlatforms
+  }
+
+  /**
+   * Perform sync only when needed - cached-first approach
+   */
+  async performInitialSync(userId: string, config?: InitialSyncConfig): Promise<SyncResult | null> {
+    const syncDecision = await this.shouldSyncExternally(userId, config)
+    
+    if (!syncDecision.shouldSync) {
+      console.log(`📚 Using cached data for user ${userId}: ${syncDecision.reason}`)
+      return null
     }
 
     try {
       this.isSyncing.set(userId, true)
       this.lastSyncTime.set(userId, Date.now())
       
-      console.log(`Auto-sync triggered for user ${userId} for platforms: ${platforms.join(', ')}`)
+      console.log(`🔄 External sync for user ${userId}: ${syncDecision.reason}`)
+      console.log(`📡 Fetching from: ${syncDecision.platforms.join(', ')}`)
 
-      // Use unified sync service
       const result = await unifiedMessageSyncService.syncAllPlatforms(userId)
       
-      // Update sync status in database
-      await this.updateSyncStatus(userId, result)
-
-      // Mark new messages as unread
-      await this.markNewMessagesAsUnread(userId, result)
-
-      console.log(`Auto-sync completed for user ${userId}: ${result.totalMessagesProcessed} messages processed`)
+      console.log(`✅ External sync completed for user ${userId}: ${result.totalMessagesProcessed} messages processed`)
+      
+      return result
 
     } catch (error) {
-      console.error(`Auto-sync failed for user ${userId}:`, error)
+      console.error(`❌ External sync failed for user ${userId}:`, error)
+      throw error
     } finally {
       this.isSyncing.set(userId, false)
     }
   }
 
   /**
-   * Update user's sync status
+   * Force sync from external APIs (user-initiated)
    */
-  private async updateSyncStatus(userId: string, syncResult: SyncResult) {
-    try {
-      // For now, just log the sync result since we don't have syncStatus field in DB
-      console.log(`Sync completed for user ${userId}:`, {
-        totalMessages: syncResult.totalMessagesProcessed,
-        platforms: syncResult.platforms.map(p => ({
-          platform: p.platform,
-          messagesProcessed: p.messagesProcessed,
-          newMessages: p.newMessages,
-          lastSync: new Date()
-        }))
-      })
-      
-      // Could store this in a separate sync_logs table or user preferences later
-    } catch (error) {
-      console.error('Failed to update sync status:', error)
-    }
+  async forceSyncNow(userId: string): Promise<SyncResult | null> {
+    console.log(`🔄 Manual sync requested for user ${userId}`)
+    return await this.performInitialSync(userId, { forceSync: true })
   }
 
   /**
-   * Mark newly synced messages as unread
-   */
-  private async markNewMessagesAsUnread(userId: string, syncResult: SyncResult) {
-    try {
-      const totalNewMessages = syncResult.platforms.reduce(
-        (sum: number, p) => sum + p.newMessages, 
-        0
-      )
-
-      if (totalNewMessages > 0) {
-        // Get messages that don't have read status yet (newly synced are automatically unread)
-        const recentMessages = await prisma.message.findMany({
-          where: {
-            userId,
-            readAt: null // Not read yet
-          }
-        })
-
-        // Mark as unread (readAt remains null, but we ensure they're flagged)
-        console.log(`Found ${recentMessages.length} unread messages for user ${userId} (${totalNewMessages} newly synced)`)
-      }
-    } catch (error) {
-      console.error('Failed to mark messages as unread:', error)
-    }
-  }
-
-  /**
-   * Get sync status for a user
-   */
-  async getSyncStatus(userId: string) {
-    const isRunning = this.syncIntervals.has(userId)
-    const isSyncing = this.isSyncing.get(userId) || false
-
-    // Get basic user info to verify they exist
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { 
-        id: true,
-        createdAt: true
-      }
-    })
-
-    if (!user) {
-      return {
-        autoSyncEnabled: false,
-        currentlySyncing: false,
-        lastSync: null,
-        syncStatus: null
-      }
-    }
-
-    return {
-      autoSyncEnabled: isRunning,
-      currentlySyncing: isSyncing,
-      lastSync: user.createdAt, // Placeholder - could be enhanced later
-      syncStatus: null // Will implement when we add proper DB fields
-    }
-  }
-
-  /**
-   * Force sync now for a user
-   */
-  async forceSyncNow(userId: string) {
-    console.log(`Force sync requested for user ${userId}`)
-    return await this.performAutoSync(userId, ['slack', 'gmail'])
-  }
-
-  /**
-   * Check if a user is currently syncing (useful for external callers)
+   * Check if a user is currently syncing
    */
   isUserSyncing(userId: string): boolean {
     return this.isSyncing.get(userId) || false
@@ -228,30 +275,40 @@ export class AutoSyncService {
     const lastSync = this.lastSyncTime.get(userId)
     return lastSync ? Date.now() - lastSync : Infinity
   }
+
+  /**
+   * Get comprehensive sync status
+   */
+  async getSyncStatus(userId: string) {
+    const isSyncing = this.isSyncing.get(userId) || false
+    const lastSyncTime = this.lastSyncTime.get(userId)
+    const cachedStatus = await this.getCachedStatus(userId)
+    const syncDecision = await this.shouldSyncExternally(userId)
+
+    return {
+      currentlySyncing: isSyncing,
+      lastSync: lastSyncTime ? new Date(lastSyncTime) : null,
+      webhooksEnabled: true,
+      syncStrategy: 'cached-first + webhooks',
+      cachedData: cachedStatus,
+      recommendedAction: syncDecision.shouldSync ? 'sync' : 'use-cache',
+      reason: syncDecision.reason
+    }
+  }
 }
 
 // Singleton instance
 export const autoSyncService = new AutoSyncService()
 
-// Helper function to initialize auto-sync for all users on app start
-export async function initializeAutoSyncForAllUsers() {
-  try {
-    const users = await prisma.user.findMany({
-      where: {
-        OR: [
-          { slackAccessToken: { not: null } },
-          { googleAccessToken: { not: null } }
-        ]
-      },
-      select: { id: true }
-    })
-
-    console.log(`Initializing auto-sync for ${users.length} users`)
-
-    for (const user of users) {
-      await autoSyncService.startAutoSync(user.id)
-    }
-  } catch (error) {
-    console.error('Failed to initialize auto-sync:', error)
-  }
+/**
+ * Initialize webhook-driven sync system
+ */
+export async function initializeWebhookDrivenSync() {
+  console.log('🚀 Initializing cached-first sync system...')
+  
+  // Set up webhook endpoints if not already done
+  // This would include Slack event subscriptions, Gmail push notifications, etc.
+  
+  console.log('✅ Cached-first sync system ready')
+  console.log('ℹ️  Strategy: Cached data first + External sync only when needed + Webhooks for real-time')
 } 

@@ -8,7 +8,6 @@ import { Phone, Plus, X } from 'lucide-react'
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome'
 import { faGoogle, faSlack, faMicrosoft, faLinkedin } from '@fortawesome/free-brands-svg-icons'
 import { SlackConnectButton } from '@components/SlackConnectButton'
-import { GoogleIntegrationDialog } from '@components/GoogleIntegrationDialog'
 import { toast } from 'sonner'
 
 // Design system constants
@@ -29,7 +28,6 @@ export default function OnboardingPage() {
   const [currentStep, setCurrentStep] = useState(0)
   const [contactConnections, setContactConnections] = useState<Set<string>>(new Set())
   const [messageConnections, setMessageConnections] = useState<Set<string>>(new Set())
-  const [showGoogleDialog, setShowGoogleDialog] = useState(false)
 
   const contactPlatforms: PlatformOption[] = [
     {
@@ -95,22 +93,20 @@ export default function OnboardingPage() {
 
   const handleContactConnect = (platformId: string) => {
     if (platformId === 'google-contacts') {
-      setShowGoogleDialog(true)
+      window.location.href = '/api/auth/google/connect';
+    } else {
+      toast.info(`Connection for ${platformId} not yet implemented.`);
     }
   }
 
   const handleMessageConnect = (platformId: string) => {
     if (platformId === 'gmail') {
-      setShowGoogleDialog(true)
+      window.location.href = '/api/auth/google/connect';
+    } else if (platformId === 'slack') {
+      toast.info("Use the dedicated Slack button below.");
+    } else {
+      toast.info(`Connection for ${platformId} not yet implemented.`);
     }
-  }
-
-  const handleGoogleIntegrationSuccess = () => {
-    // Mark both contacts and messages as connected since Google provides both
-    setContactConnections(prev => new Set([...prev, 'google-contacts']))
-    setMessageConnections(prev => new Set([...prev, 'gmail']))
-    setShowGoogleDialog(false)
-    toast.success('Google connected successfully!')
   }
 
   const handleNext = () => {
@@ -255,10 +251,17 @@ export default function OnboardingPage() {
                 ? contactConnections.has(platform.id)
                 : messageConnections.has(platform.id)
               }
-              onConnect={() => currentStep === 0 
-                ? handleContactConnect(platform.id)
-                : handleMessageConnect(platform.id)
-              }
+              onConnect={() => {
+                if (platform.id === 'google-contacts' || platform.id === 'gmail') {
+                  window.location.href = '/api/auth/google/connect';
+                } else if (platform.id === 'slack') {
+                  toast.info("Please use the dedicated Slack button for connection.");
+                } else {
+                  currentStep === 0 
+                    ? handleContactConnect(platform.id)
+                    : handleMessageConnect(platform.id)
+                }
+              }}
             />
           ))}
         </div>
@@ -283,12 +286,6 @@ export default function OnboardingPage() {
           </Button>
         </div>
       </div>
-
-      {/* Google Integration Dialog */}
-      <GoogleIntegrationDialog 
-        isOpen={showGoogleDialog}
-        onClose={handleGoogleIntegrationSuccess}
-      />
     </div>
   )
 } 

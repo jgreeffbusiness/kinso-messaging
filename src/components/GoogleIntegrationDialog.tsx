@@ -103,20 +103,12 @@ export function GoogleIntegrationDialog({
       }
 
       // We need the OAuth access token - not the Firebase ID token
-      const accessToken = result._tokenResponse.oauthAccessToken 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const accessToken = (result as any)._tokenResponse.oauthAccessToken 
 
       // This is the OAuth refresh token we need to save
-      const refreshToken = result._tokenResponse.refreshToken
-      
-      console.log('Auth result:', result)
-      console.log('Refresh token:', refreshToken)
-      
-      // After Firebase auth completes:
-      console.log('Complete auth result:', JSON.stringify(result, null, 2))
-
-      // Specifically check for the refresh token
-      console.log('Token response:', result._tokenResponse)
-      console.log('Refresh token exists:', !!result._tokenResponse?.refresh_token)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const refreshToken = (result as any)._tokenResponse.refreshToken
       
       if (!accessToken) {
         throw new Error('Failed to get access token')

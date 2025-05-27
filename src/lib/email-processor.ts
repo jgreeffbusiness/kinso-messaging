@@ -126,4 +126,41 @@ export function basicEmailExtraction(rawContent: string): Partial<CleanedEmail> 
     urgency: 'low',
     category: 'other'
   }
+}
+
+// Ensure this helper is exported
+export function extractEmailContent(message: any): string { // Kept message as any for broad compatibility from Gmail API
+  // If plain text part exists, use that
+  const plainPart = findBodyPart(message.data?.payload, 'text/plain'); // Added optional chaining
+  if (plainPart?.body?.data) { // Added optional chaining
+    return Buffer.from(plainPart.body.data, 'base64').toString();
+  }
+  
+  const htmlPart = findBodyPart(message.data?.payload, 'text/html'); // Added optional chaining
+  if (htmlPart?.body?.data) { // Added optional chaining
+    const htmlContent = Buffer.from(htmlPart.body.data, 'base64').toString();
+    return stripHtmlTags(htmlContent);
+  }
+  
+  return message.snippet || 'No content available'; // Fallback to snippet or generic message
+}
+
+// Ensure this helper is exported if used by extractEmailContent
+export function findBodyPart(part: any, mimeType: string): any | null {
+  if (!part) return null;
+  if (part.mimeType === mimeType) {
+    return part;
+  }
+  if (part.parts) {
+    for (const subPart of part.parts) {
+      const found = findBodyPart(subPart, mimeType);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// Ensure this helper is exported if used by extractEmailContent
+export function stripHtmlTags(html: string): string {
+  return html.replace(/<[^>]+>/g, '');
 } 

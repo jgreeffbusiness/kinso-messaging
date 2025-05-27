@@ -55,32 +55,32 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Group messages by thread ID (extract from platformData)
-    const threadsMap = new Map<string, typeof messages>()
+    // Group messages by conversation (contact + time proximity)
+    const conversationsMap = new Map<string, typeof messages>()
     
     for (const message of messages) {
-      let threadId = 'default_thread'
+      // Group by contact - all messages with same contact become one conversation
+      const conversationKey = `slack_conversation_${message.contactId}`
       
-      // Try to extract thread ID from platformData
-      if (message.platformData && typeof message.platformData === 'object') {
-        const data = message.platformData as Record<string, unknown>
-        threadId = (data.threadId as string) || (data.thread_ts as string) || threadId
+      if (!conversationsMap.has(conversationKey)) {
+        conversationsMap.set(conversationKey, [])
       }
-      
-      if (!threadsMap.has(threadId)) {
-        threadsMap.set(threadId, [])
-      }
-      threadsMap.get(threadId)!.push(message)
+      conversationsMap.get(conversationKey)!.push(message)
     }
 
     const threadAnalyses = []
 
-    // Analyze each thread
-    for (const [threadId, threadMessages] of threadsMap) {
-      if (threadMessages.length === 0) continue
+    // Analyze each conversation
+    for (const [conversationKey, conversationMessages] of conversationsMap) {
+      if (conversationMessages.length === 0) continue
+
+      // Sort messages chronologically
+      const sortedMessages = conversationMessages.sort((a, b) => 
+        a.timestamp.getTime() - b.timestamp.getTime()
+      )
 
       // Convert to thread processor format
-      const formattedMessages = threadMessages.map(msg => {
+      const formattedMessages = sortedMessages.map(msg => {
         // Extract sender info from platformData
         let from = user.email || 'unknown@example.com'
         let isFromUser = true
@@ -101,7 +101,7 @@ export async function POST(request: NextRequest) {
           id: msg.platformMessageId,
           from: from,
           to: [contact.email || 'slack-contact'],
-          subject: `Slack conversation`, // Slack doesn't have subjects
+          subject: `Slack conversation with ${contact.fullName}`,
           content: msg.content,
           timestamp: msg.timestamp,
           direction: isFromUser ? 'outbound' as const : 'inbound' as const,
@@ -117,36 +117,40 @@ export async function POST(request: NextRequest) {
         )
 
         threadAnalyses.push({
-          threadId,
-          messageCount: threadMessages.length,
+          conversationKey,
+          messageCount: conversationMessages.length,
           analysis,
-          lastActivity: threadMessages[threadMessages.length - 1].timestamp
+          lastActivity: sortedMessages[sortedMessages.length - 1].timestamp
         })
 
-        // Store the analysis as a summary message
+        // Store the analysis as a summary message that will be picked up by threading logic
+        const summaryId = `slack_thread_summary_${conversationKey}`
+        
         const existingSummary = await prisma.message.findFirst({
           where: {
             userId: decoded.userId,
             contactId,
-            platformMessageId: `slack_thread_summary_${threadId}`
+            platformMessageId: summaryId
           }
         })
+
+        const summaryData = {
+          content: analysis.summary,
+          timestamp: new Date(),
+          platformData: {
+            isThreadSummary: true,
+            threadId: conversationKey,
+            analysis: JSON.parse(JSON.stringify(analysis)),
+            messageCount: conversationMessages.length,
+            platform: 'slack'
+          }
+        }
 
         if (existingSummary) {
           // Update existing summary
           await prisma.message.update({
             where: { id: existingSummary.id },
-            data: {
-              content: analysis.threadSummary,
-              timestamp: new Date(),
-              platformData: {
-                isThreadSummary: true,
-                threadId,
-                analysis: JSON.parse(JSON.stringify(analysis)),
-                messageCount: threadMessages.length,
-                platform: 'slack'
-              }
-            }
+            data: summaryData
           })
         } else {
           // Create new summary
@@ -155,22 +159,14 @@ export async function POST(request: NextRequest) {
               userId: decoded.userId,
               contactId,
               platform: 'slack_thread_summary',
-              platformMessageId: `slack_thread_summary_${threadId}`,
-              content: analysis.threadSummary,
-              timestamp: new Date(),
-              platformData: {
-                isThreadSummary: true,
-                threadId,
-                analysis: JSON.parse(JSON.stringify(analysis)),
-                messageCount: threadMessages.length,
-                platform: 'slack'
-              }
+              platformMessageId: summaryId,
+              ...summaryData
             }
           })
         }
 
       } catch (analysisError) {
-        console.error(`Error analyzing Slack thread ${threadId}:`, analysisError)
+        console.error(`Error analyzing conversation ${conversationKey}:`, analysisError)
         continue
       }
     }

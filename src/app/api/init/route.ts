@@ -1,20 +1,21 @@
 import { NextResponse } from 'next/server'
-import { initializeAutoSyncForAllUsers } from '@/lib/services/auto-sync-service'
+import { initializeWebhookDrivenSync } from '@/lib/services/auto-sync-service'
 
 export async function POST() {
   try {
-    console.log('Initializing auto-sync for all users...')
+    console.log('🚀 Initializing webhook-driven sync system...')
     
-    await initializeAutoSyncForAllUsers()
+    await initializeWebhookDrivenSync()
     
     return NextResponse.json({ 
       success: true, 
-      message: 'Auto-sync initialized for all users' 
+      message: 'Webhook-driven sync system initialized',
+      syncStrategy: 'initial-sync-on-page-load + webhooks'
     })
   } catch (error) {
-    console.error('Failed to initialize auto-sync:', error)
+    console.error('Failed to initialize sync system:', error)
     return NextResponse.json(
-      { error: 'Failed to initialize auto-sync' },
+      { error: 'Failed to initialize sync system' },
       { status: 500 }
     )
   }
@@ -23,7 +24,8 @@ export async function POST() {
 // Also allow GET for health checks
 export async function GET() {
   return NextResponse.json({ 
-    status: 'Auto-sync service ready',
+    status: 'Webhook-driven sync service ready',
+    strategy: 'initial-sync-on-page-load + webhooks',
     timestamp: new Date().toISOString()
   })
 } 

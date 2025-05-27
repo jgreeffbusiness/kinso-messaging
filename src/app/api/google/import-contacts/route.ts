@@ -3,6 +3,8 @@ import { cookies } from 'next/headers'
 import { verify } from 'jsonwebtoken'
 import { prisma } from '@server/db'
 import { filterRealContacts } from '@/lib/utils/bot-detection'
+import { contactUnificationService } from '@/lib/services/contact-unification-service'
+import type { PlatformContact } from '@/lib/platforms/types'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'
 
@@ -55,90 +57,68 @@ export async function POST(request: Request) {
     
     console.log(`Importing ${realContacts.length} real contacts (filtered ${filteredBots.length} bots)`)
     
-    // Get existing contacts to avoid duplicates
-    const existingContacts = await prisma.contact.findMany({
-      where: {
-        userId: decoded.userId,
-        OR: [
-          { googleId: { in: realContacts.map(c => c.id).filter((id): id is string => !!id) } },
-          { email: { in: realContacts.map(c => c.email).filter((email): email is string => !!email) } }
-        ]
-      },
-      select: { googleId: true, email: true }
-    })
+    let imported = 0
+    let matched = 0
+    const errors: string[] = []
     
-    const existingGoogleIds = new Set(
-      existingContacts
-        .map(contact => contact.googleId)
-        .filter(Boolean)
-    )
-    
-    const existingEmails = new Set(
-      existingContacts
-        .map(contact => contact.email)
-        .filter(Boolean)
-    )
-    
-    // Filter out duplicates from real contacts
-    const contactsToCreate = realContacts.filter(contact => {
-      // Skip if we already have this Google ID
-      if (contact.id && existingGoogleIds.has(contact.id)) return false
-      
-      // Skip if we already have this email
-      if (contact.email && existingEmails.has(contact.email)) return false
-      
-      return true
-    })
-    
-    console.log(`After filtering duplicates, importing ${contactsToCreate.length} contacts`)
-    
-    if (contactsToCreate.length === 0) {
-      return NextResponse.json({
-        success: true,
-        imported: 0,
-        filtered: filteredBots.length,
-        message: filteredBots.length > 0 
-          ? `All contacts were duplicates or bots (${filteredBots.length} filtered)`
-          : "All contacts already exist"
-      })
+    // Process each contact through the unification service
+    for (const contact of realContacts) {
+      try {
+        // Convert to PlatformContact format
+        const platformContact: PlatformContact = {
+          id: contact.id,
+          name: contact.name || 'Unnamed Contact',
+          email: contact.email || undefined,
+          avatar: contact.photoUrl || undefined,
+          handle: undefined, // Google contacts don't typically have handles
+          platformSpecific: {
+            phone: contact.phone,
+            googleId: contact.id
+          }
+        }
+        
+        // Use contact unification service to find or create unified contact
+        const unifiedContactId = await contactUnificationService.unifyContact(
+          platformContact,
+          'google',
+          decoded.userId
+        )
+        
+        // Check if this was a new contact or matched existing
+        const existingContact = await prisma.contact.findUnique({
+          where: { id: unifiedContactId }
+        })
+        
+        if (existingContact) {
+          const platformData = (existingContact.platformData as Record<string, unknown>) || {}
+          if (platformData.google) {
+            matched++
+            console.log(`Matched existing contact: ${contact.name} (${contact.email})`)
+          } else {
+            imported++
+            console.log(`Added Google identity to existing contact: ${contact.name} (${contact.email})`)
+          }
+        }
+        
+      } catch (error) {
+        const errorMsg = `Failed to process contact ${contact.name}: ${error}`
+        errors.push(errorMsg)
+        console.error(errorMsg)
+        // Continue with next contact instead of failing the whole import
+      }
     }
     
-    // Create contacts in database
-    const result = await prisma.$transaction(async (prisma) => {
-      const createdContacts = []
-      
-      // Create one by one to handle errors better
-      for (const contact of contactsToCreate) {
-        try {
-          const created = await prisma.contact.create({
-            data: {
-              userId: decoded.userId,
-              googleId: contact.id,
-              fullName: contact.name || 'Unnamed Contact',
-              email: contact.email,
-              phone: contact.phone,
-              photoUrl: contact.photoUrl,
-              source: 'google'
-            }
-          })
-          
-          createdContacts.push(created)
-        } catch (err) {
-          console.error(`Failed to create contact ${contact.name}:`, err)
-          // Continue with next contact
-        }
-      }
-      
-      return createdContacts
-    })
+    console.log(`Import completed: ${imported} new, ${matched} matched, ${errors.length} errors`)
     
     return NextResponse.json({
       success: true,
-      imported: result.length,
+      imported,
+      matched,
       filtered: filteredBots.length,
-      message: filteredBots.length > 0 
-        ? `Imported ${result.length} contacts (filtered ${filteredBots.length} bots/automated accounts)`
-        : `Imported ${result.length} contacts`
+      errors: errors.length,
+      message: errors.length > 0 
+        ? `Imported ${imported} contacts, matched ${matched} existing (${errors.length} errors, ${filteredBots.length} filtered)`
+        : `Imported ${imported} contacts, matched ${matched} existing (${filteredBots.length} filtered)`
     })
     
   } catch (error) {

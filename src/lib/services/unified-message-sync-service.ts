@@ -1,8 +1,9 @@
 import { prisma } from '@/server/db'
 import { Prisma } from '@prisma/client'
 import { contactUnificationService } from './contact-unification-service'
-import { syncStateManager } from './sync-state-manager'
 import { SlackAdapter } from '@/lib/platforms/adapters/slack'
+import { syncAllUserEmails } from '@/server/services/gmail'
+import { syncStateManager } from './sync-state-manager'
 // Import other platform adapters as they're created
 // import { GmailAdapter } from '@/lib/platforms/adapters/gmail'
 
@@ -41,40 +42,82 @@ export class UnifiedMessageSyncService {
    * Sync all platforms for a user
    */
   async syncAllPlatforms(userId: string): Promise<UnifiedSyncResult> {
-    console.log(`Starting unified sync for user ${userId}`)
+    console.log(`[UnifiedSync] Starting unified sync for user ${userId}`)
     
+    // Set syncing in progress for relevant platforms
+    // Check if user has integrations before setting flags
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { slackIntegrations: true, googleAccessToken: true }
+    })
+
+    if (user?.slackIntegrations) {
+      await syncStateManager.setSyncInProgress(userId, 'slack', true)
+    }
+    if (user?.googleAccessToken) {
+      await syncStateManager.setSyncInProgress(userId, 'gmail', true)
+    }
+
     const results: SyncResult[] = []
     const errors: string[] = []
     let crossPlatformMatches = 0
 
-    // Step 1: Sync Slack
     try {
-      const slackResult = await this.syncSlackForUser(userId)
-      results.push(slackResult)
-    } catch (error) {
-      errors.push(`Slack sync failed: ${error}`)
-      console.error('Slack sync error:', error)
+      // Step 1: Sync Slack
+      if (user?.slackIntegrations) {
+        try {
+          console.log(`[UnifiedSync] Attempting Slack sync for ${userId}`)
+          const slackResult = await this.syncSlackForUser(userId)
+          results.push(slackResult)
+          // If syncSlackForUser calls markInitialSyncComplete or updateLastSync, 
+          // isCurrentlySyncing for slack will be set to false by syncStateManager.
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          errors.push(`Slack sync failed: ${errorMessage}`)
+          console.error('[UnifiedSync] Slack sync error:', errorMessage)
+        }
+      }
+
+      // Step 2: Sync Gmail
+      if (user?.googleAccessToken) {
+        try {
+          console.log(`[UnifiedSync] Attempting Gmail sync for ${userId}`)
+          const gmailResult = await this.syncGmailForUser(userId)
+          results.push(gmailResult)
+          // If syncGmailForUser (via syncAllUserEmails) eventually calls markInitialSyncComplete or updateLastSync
+          // for Gmail, isCurrentlySyncing for gmail will be set to false by syncStateManager.
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          errors.push(`Gmail sync failed: ${errorMessage}`)
+          console.error('[UnifiedSync] Gmail sync error:', errorMessage)
+        }
+      }
+
+      // Step 3: Cross-platform contact consolidation
+      try {
+        crossPlatformMatches = await this.performCrossPlatformMatching(userId)
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        errors.push(`Cross-platform matching failed: ${errorMessage}`)
+        console.error('[UnifiedSync] Cross-platform matching error:', errorMessage)
+      }
+    } finally {
+      // Always ensure syncing flags are cleared for platforms that were attempted
+      if (user?.slackIntegrations) {
+        await syncStateManager.setSyncInProgress(userId, 'slack', false)
+        console.log(`[UnifiedSync] Slack sync in_progress flag cleared for ${userId}`)
+      }
+      if (user?.googleAccessToken) {
+        await syncStateManager.setSyncInProgress(userId, 'gmail', false)
+        console.log(`[UnifiedSync] Gmail sync in_progress flag cleared for ${userId}`)
+      }
+      console.log(`[UnifiedSync] Unified sync attempt finished for user ${userId}.`)
     }
-
-    // Step 2: Sync Gmail (when implemented)
-    // try {
-    //   const gmailResult = await this.syncGmailForUser(userId)
-    //   results.push(gmailResult)
-    // } catch (error) {
-    //   errors.push(`Gmail sync failed: ${error}`)
-    // }
-
-    // Step 3: Cross-platform contact consolidation
-    try {
-      crossPlatformMatches = await this.performCrossPlatformMatching(userId)
-    } catch (error) {
-      errors.push(`Cross-platform matching failed: ${error}`)
-    }
-
+    
     const totalContactsProcessed = results.reduce((sum, r) => sum + r.contactsProcessed, 0)
     const totalMessagesProcessed = results.reduce((sum, r) => sum + r.messagesProcessed, 0)
 
-    console.log(`Unified sync completed for user ${userId}: ${totalContactsProcessed} contacts, ${totalMessagesProcessed} messages`)
+    console.log(`[UnifiedSync] Completed for ${userId}: ${totalContactsProcessed} contacts, ${totalMessagesProcessed} messages`)
 
     return {
       platforms: results,
@@ -127,8 +170,8 @@ export class UnifiedMessageSyncService {
         
         // Build contact mapping from existing data
         existingSlackContacts.forEach(contact => {
-          const platformData = contact.platformData as Record<string, any>
-          const slackData = platformData?.slack
+          const platformData = contact.platformData as Record<string, unknown>
+          const slackData = platformData?.slack as { platformContactId?: string } | undefined
           if (slackData?.platformContactId) {
             unifiedContactMap.set(slackData.platformContactId, contact.id)
           }
@@ -237,6 +280,32 @@ export class UnifiedMessageSyncService {
         }
       }
 
+      // Step 3: Automatically create conversation summaries if we have new messages
+      if (newMessages > 0) {
+        console.log(`📝 Auto-creating Slack conversation summaries for ${newMessages} new messages...`)
+        
+        try {
+          const conversationResult = await this.createSlackConversationSummaries(userId)
+          console.log(`✅ Created ${conversationResult.conversationsCreated} conversation summaries`)
+        } catch (convError) {
+          console.error('Failed to create conversation summaries:', convError)
+          errors.push(`Failed to create conversation summaries: ${convError}`)
+        }
+      } else if (messagesProcessed > 0) {
+        // Also check for existing messages that need conversation summaries
+        console.log(`📝 Checking for missing conversation summaries for existing messages...`)
+        
+        try {
+          const conversationResult = await this.createSlackConversationSummaries(userId)
+          if (conversationResult.conversationsCreated > 0) {
+            console.log(`✅ Created ${conversationResult.conversationsCreated} conversation summaries for existing messages`)
+          }
+        } catch (convError) {
+          console.error('Failed to create conversation summaries for existing messages:', convError)
+          errors.push(`Failed to create conversation summaries: ${convError}`)
+        }
+      }
+
     } catch (error) {
       errors.push(`Slack sync error: ${error}`)
       throw error
@@ -250,6 +319,40 @@ export class UnifiedMessageSyncService {
       messagesProcessed,
       newMessages,
       errors
+    }
+  }
+
+  /**
+   * Sync Gmail platform for a user
+   */
+  private async syncGmailForUser(userId: string): Promise<SyncResult> {
+    console.log(`Syncing Gmail for user ${userId}`)
+    
+    try {
+      // Use the existing Gmail sync service
+      const result = await syncAllUserEmails(userId)
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Gmail sync failed')
+      }
+      
+      // Count results from the Gmail sync
+      const gmailResults = result.results || []
+      const totalMessages = gmailResults.reduce((sum, r) => sum + (r.result?.count || 0), 0)
+      
+      return {
+        platform: 'gmail',
+        contactsProcessed: gmailResults.length,
+        contactsCreated: 0, // Gmail sync works with existing contacts
+        contactsMatched: gmailResults.length,
+        messagesProcessed: totalMessages,
+        newMessages: totalMessages,
+        errors: []
+      }
+      
+    } catch (error) {
+      console.error('Gmail sync error:', error)
+      throw error
     }
   }
 
@@ -495,6 +598,349 @@ export class UnifiedMessageSyncService {
       contactsProcessed,
       contactsCreated,
       contactsMatched,
+      errors
+    }
+  }
+
+  /**
+   * Manually merge duplicate contacts (useful for cleaning up existing duplicates)
+   */
+  async mergeDuplicateContacts(userId: string): Promise<{
+    merged: number
+    errors: string[]
+  }> {
+    console.log(`Starting manual duplicate contact merge for user ${userId}`)
+    
+    let merged = 0
+    const errors: string[] = []
+    
+    try {
+      // Get all contacts for the user
+      const contacts = await prisma.contact.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'asc' } // Process older contacts first
+      })
+
+      // Group contacts by email for easy matching
+      const emailGroups = new Map<string, typeof contacts>()
+      
+      contacts.forEach(contact => {
+        if (contact.email) {
+          const email = contact.email.toLowerCase()
+          if (!emailGroups.has(email)) {
+            emailGroups.set(email, [])
+          }
+          emailGroups.get(email)!.push(contact)
+        }
+      })
+
+      // Also group by similar names (for contacts without emails)
+      const nameGroups = new Map<string, typeof contacts>()
+      contacts.forEach(contact => {
+        if (!contact.email && contact.fullName) {
+          const normalizedName = contact.fullName.toLowerCase().trim()
+          if (!nameGroups.has(normalizedName)) {
+            nameGroups.set(normalizedName, [])
+          }
+          nameGroups.get(normalizedName)!.push(contact)
+        }
+      })
+
+      // Merge contacts with same email
+      for (const [email, contactGroup] of emailGroups) {
+        if (contactGroup.length > 1) {
+          console.log(`Found ${contactGroup.length} contacts with email ${email}`)
+          try {
+            await this.mergeContacts(contactGroup, userId)
+            merged += contactGroup.length - 1 // All but one were merged
+            console.log(`Merged ${contactGroup.length - 1} duplicate contacts for ${email}`)
+          } catch (error) {
+            const errorMsg = `Failed to merge contacts for email ${email}: ${error}`
+            errors.push(errorMsg)
+            console.error(errorMsg)
+          }
+        }
+      }
+
+      // Merge contacts with same name (no email)
+      for (const [name, contactGroup] of nameGroups) {
+        if (contactGroup.length > 1) {
+          console.log(`Found ${contactGroup.length} contacts with name "${name}" (no email)`)
+          try {
+            await this.mergeContacts(contactGroup, userId)
+            merged += contactGroup.length - 1
+            console.log(`Merged ${contactGroup.length - 1} duplicate contacts for "${name}"`)
+          } catch (error) {
+            const errorMsg = `Failed to merge contacts for name "${name}": ${error}`
+            errors.push(errorMsg)
+            console.error(errorMsg)
+          }
+        }
+      }
+
+      console.log(`Manual duplicate merge completed: ${merged} contacts merged, ${errors.length} errors`)
+
+    } catch (error) {
+      const errorMsg = `Manual duplicate merge failed: ${error}`
+      errors.push(errorMsg)
+      console.error(errorMsg)
+    }
+
+    return { merged, errors }
+  }
+
+  /**
+   * Get a list of potential duplicate contacts for review
+   */
+  async findPotentialDuplicates(userId: string): Promise<{
+    emailDuplicates: Array<{
+      email: string
+      contacts: Array<{ id: string, fullName: string, platforms: string[] }>
+    }>
+    nameDuplicates: Array<{
+      name: string  
+      contacts: Array<{ id: string, email: string | null, platforms: string[] }>
+    }>
+  }> {
+    const contacts = await prisma.contact.findMany({
+      where: { userId }
+    })
+
+    const emailDuplicates: any[] = []
+    const nameDuplicates: any[] = []
+
+    // Group by email
+    const emailGroups = new Map<string, typeof contacts>()
+    contacts.forEach(contact => {
+      if (contact.email) {
+        const email = contact.email.toLowerCase()
+        if (!emailGroups.has(email)) {
+          emailGroups.set(email, [])
+        }
+        emailGroups.get(email)!.push(contact)
+      }
+    })
+
+    // Find email duplicates
+    for (const [email, contactGroup] of emailGroups) {
+      if (contactGroup.length > 1) {
+        emailDuplicates.push({
+          email,
+          contacts: contactGroup.map(contact => ({
+            id: contact.id,
+            fullName: contact.fullName,
+            platforms: this.extractPlatformsFromContact(contact)
+          }))
+        })
+      }
+    }
+
+    // Group by name (for contacts without email)
+    const nameGroups = new Map<string, typeof contacts>()
+    contacts.forEach(contact => {
+      if (!contact.email && contact.fullName) {
+        const normalizedName = contact.fullName.toLowerCase().trim()
+        if (!nameGroups.has(normalizedName)) {
+          nameGroups.set(normalizedName, [])
+        }
+        nameGroups.get(normalizedName)!.push(contact)
+      }
+    })
+
+    // Find name duplicates
+    for (const [name, contactGroup] of nameGroups) {
+      if (contactGroup.length > 1) {
+        nameDuplicates.push({
+          name,
+          contacts: contactGroup.map(contact => ({
+            id: contact.id,
+            email: contact.email,
+            platforms: this.extractPlatformsFromContact(contact)
+          }))
+        })
+      }
+    }
+
+    return { emailDuplicates, nameDuplicates }
+  }
+
+  private extractPlatformsFromContact(contact: any): string[] {
+    const platformData = (contact.platformData as Record<string, unknown>) || {}
+    return Object.keys(platformData)
+  }
+
+  /**
+   * Automatically create Slack conversation summaries for a user
+   */
+  private async createSlackConversationSummaries(userId: string): Promise<{
+    conversationsCreated: number
+    totalContacts: number
+    errors: string[]
+  }> {
+    const { analyzeEmailThread } = await import('@/lib/thread-processor')
+    
+    // Get user info
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true, slackUserId: true, name: true }
+    })
+
+    if (!user?.email) {
+      throw new Error('User not found')
+    }
+
+    // Get all Slack messages for this user
+    const messages = await prisma.message.findMany({
+      where: {
+        userId,
+        platform: 'slack'
+      },
+      include: {
+        contact: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            platformData: true
+          }
+        }
+      },
+      orderBy: { timestamp: 'asc' }
+    })
+
+    if (messages.length === 0) {
+      return { conversationsCreated: 0, totalContacts: 0, errors: [] }
+    }
+
+    // Group messages by contact to create conversations
+    const conversationsMap = new Map<string, typeof messages>()
+    
+    for (const message of messages) {
+      if (!message.contact) continue
+      
+      const contact = message.contact;
+      const platformData = (contact.platformData as Record<string, unknown>) || {};
+      const slackData = platformData.slack as { platformContactId?: string; [key: string]: any } | undefined;
+      
+      // More precise self-conversation check: primarily rely on matching Slack User IDs.
+      // Only consider name match as a weaker secondary check if Slack IDs aren't definitive.
+      let isSelfConversation = false;
+      if (user.slackUserId && slackData?.platformContactId) {
+        isSelfConversation = slackData.platformContactId === user.slackUserId;
+      } else if (user.name && contact.fullName === user.name && platformData.slack) {
+        // Fallback: if Slack IDs are missing on either side, but names match and it's a known Slack contact.
+        // This is less reliable and might need to be even stricter or removed if it causes issues.
+        console.warn(`Self-conversation check for ${contact.fullName} falling back to name match due to missing Slack IDs.`);
+        isSelfConversation = true; 
+      }
+      
+      if (isSelfConversation) {
+        console.log(`⚠️  Skipping self-conversation with ${contact.fullName} (Contact SlackID: ${slackData?.platformContactId}, User SlackID: ${user.slackUserId})`);
+        continue;
+      }
+      
+      const conversationKey = `slack_conversation_${message.contactId}`;
+      
+      if (!conversationsMap.has(conversationKey)) {
+        conversationsMap.set(conversationKey, [])
+      }
+      conversationsMap.get(conversationKey)!.push(message)
+    }
+
+    let conversationsCreated = 0
+    const errors: string[] = []
+
+    // Create conversation summaries for each contact
+    for (const [conversationKey, conversationMessages] of conversationsMap) {
+      if (conversationMessages.length === 0) continue
+
+      const contact = conversationMessages[0].contact!
+      
+      // Skip if we already have a conversation summary for this contact
+      const existingSummary = await prisma.message.findFirst({
+        where: {
+          userId,
+          contactId: contact.id,
+          platform: 'slack_thread_summary'
+        }
+      })
+
+      if (existingSummary) {
+        continue // Skip existing summaries
+      }
+
+      try {
+        // Sort messages chronologically
+        const sortedMessages = conversationMessages.sort((a, b) => 
+          a.timestamp.getTime() - b.timestamp.getTime()
+        )
+
+        // Convert to thread processor format
+        const formattedMessages = sortedMessages.map(msg => {
+          let from = user.email || 'unknown@example.com'
+          let isFromUser = true
+          
+          if (msg.platformData && typeof msg.platformData === 'object') {
+            const data = msg.platformData as Record<string, unknown>
+            const senderId = (data.sender as string) || (data.user as string)
+            
+            isFromUser = senderId === user.slackUserId || 
+                        from.toLowerCase().includes((user.email || '').toLowerCase())
+            
+            from = senderId || from
+          }
+
+          return {
+            id: msg.platformMessageId,
+            from: from,
+            to: [contact.email || 'slack-contact'],
+            subject: `Slack conversation with ${contact.fullName}`,
+            content: msg.content,
+            timestamp: msg.timestamp,
+            direction: isFromUser ? 'outbound' as const : 'inbound' as const,
+            isFromUser
+          }
+        })
+
+        // Analyze the conversation with AI
+        const analysis = await analyzeEmailThread(
+          formattedMessages,
+          user.email,
+          contact.fullName
+        )
+
+        // Create conversation summary message
+        await prisma.message.create({
+          data: {
+            userId,
+            contactId: contact.id,
+            platform: 'slack_thread_summary',
+            platformMessageId: `slack_thread_summary_${conversationKey}`,
+            content: analysis.summary,
+            timestamp: new Date(),
+            platformData: {
+              isThreadSummary: true,
+              threadId: conversationKey,
+              analysis: JSON.parse(JSON.stringify(analysis)),
+              messageCount: conversationMessages.length,
+              platform: 'slack'
+            }
+          }
+        })
+
+        conversationsCreated++
+        console.log(`Created conversation summary for ${contact.fullName} (${conversationMessages.length} messages)`)
+
+      } catch (error) {
+        const errorMsg = `Failed to create conversation for ${contact.fullName}: ${error}`
+        errors.push(errorMsg)
+        console.error(errorMsg)
+      }
+    }
+
+    return {
+      conversationsCreated,
+      totalContacts: conversationsMap.size,
       errors
     }
   }
