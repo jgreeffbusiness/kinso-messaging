@@ -5,8 +5,10 @@ import type {
   PlatformMessage, 
   NormalizedMessage, 
   EnhancedMessage,
-  SyncResult 
+  PlatformSyncResult 
 } from '@/lib/platforms/types'
+import { supabaseAdmin } from '@/lib/supabaseClient'
+import { getEmbedding, chunkText } from '@/lib/ai/embeddingUtils'
 
 export class UnifiedMessageService {
   private static instance: UnifiedMessageService
@@ -21,15 +23,14 @@ export class UnifiedMessageService {
   /**
    * Sync messages from all platforms for a user
    */
-  async syncAllPlatforms(userId: string): Promise<Record<string, SyncResult>> {
+  async syncAllPlatforms(userId: string): Promise<Record<string, PlatformSyncResult>> {
     const registry = getPlatformRegistry()
-    const results: Record<string, SyncResult> = {}
+    const results: Record<string, PlatformSyncResult> = {}
 
     for (const adapter of registry.getAllAdapters()) {
       try {
         console.log(`Syncing ${adapter.config.displayName} for user ${userId}`)
         
-        // Check if user is authenticated with this platform
         const isAuth = await adapter.isAuthenticated(userId)
         if (!isAuth) {
           results[adapter.config.name] = {
@@ -41,7 +42,6 @@ export class UnifiedMessageService {
           continue
         }
 
-        // Sync messages from this platform
         const result = await adapter.syncMessages(userId)
         results[adapter.config.name] = result
       } catch (error) {
@@ -60,7 +60,7 @@ export class UnifiedMessageService {
   /**
    * Sync messages from a specific platform
    */
-  async syncPlatform(userId: string, platformName: string, contactId?: string): Promise<SyncResult> {
+  async syncPlatform(userId: string, platformName: string, contactId?: string): Promise<PlatformSyncResult> {
     const registry = getPlatformRegistry()
     const adapter = registry.getAdapter(platformName)
 
@@ -116,7 +116,7 @@ export class UnifiedMessageService {
       platformData: {
         threadId: platformMessage.threadId,
         direction: platformMessage.direction,
-        subject: platformMessage.metadata.subject as string,
+        subject: platformMessage.metadata?.subject as string,
         sender: platformMessage.sender,
         recipients: platformMessage.recipients,
         ...platformMessage.metadata
@@ -157,11 +157,11 @@ export class UnifiedMessageService {
   }
 
   /**
-   * Store normalized message in database
+   * Store normalized message in database and trigger embedding
    */
   async storeMessage(message: NormalizedMessage | EnhancedMessage): Promise<string> {
+    let createdMessageId: string;
     try {
-      // Check if message already exists
       const existing = await prisma.message.findFirst({
         where: {
           userId: message.userId,
@@ -171,26 +171,132 @@ export class UnifiedMessageService {
       })
 
       if (existing) {
-        return existing.id
+        createdMessageId = existing.id;
+        // Optionally, we could decide to re-embed if content might have changed, but for now, skip if exists.
+        // console.log(`[UnifiedMessageService] Message ${existing.id} already exists. Skipping store & embedding.`);
+        // return existing.id; 
+              // Inside storeMessage, after `createdMessageId` is set:
+
+        // Asynchronous embedding logic
+        if (!supabaseAdmin) { // CHECK 1
+          console.warn("[UnifiedMessageService] Supabase admin client NOT configured. Message vector cannot be stored.");
+        } else if (!createdMessageId) { // CHECK 2
+          console.warn("[UnifiedMessageService] Message ID NOT available. Embedding trigger aborted.");
+        } else { // PROCEED WITH EMBEDDING
+          console.log(`[UnifiedMessageService] Attempting to embed message ID: ${createdMessageId} for user: ${message.userId}, platform: ${message.platform}`); // LOGGING
+          
+          let textToEmbed = message.content;
+          const subject = message.platformData?.subject as string | undefined;
+          if (subject && typeof subject === 'string' && subject.trim() !== '') {
+            textToEmbed = `${subject}\n\n${message.content}`;
+          }
+          console.log(`[UnifiedMessageService] Text to embed for ${createdMessageId} (length ${textToEmbed.length}): "${textToEmbed.substring(0, 100)}..."`); // LOGGING
+
+          const chunks = chunkText({ text: textToEmbed });
+          console.log(`[UnifiedMessageService] Generated ${chunks.length} chunks for message ID: ${createdMessageId}.`); // LOGGING
+
+          if (chunks.length > 0) {
+            chunks.forEach(async (chunk, index) => {
+              console.log(`[UnifiedMessageService] Processing chunk ${index + 1}/${chunks.length} for message ${createdMessageId}.`); // LOGGING
+              const embedding = await getEmbedding(chunk, message.userId); // Calls embeddingUtils
+
+              if (embedding) { // CHECK 3: Was embedding successful?
+                console.log(`[UnifiedMessageService] Embedding successful for chunk ${index + 1} of message ${createdMessageId}.`); // LOGGING
+                try {
+                  const { error: vectorError } = await supabaseAdmin
+                    .from('platform_message_embeddings')
+                    .insert({
+                      message_id: createdMessageId, 
+                      user_id: message.userId,
+                      contact_id: message.contactId || null, 
+                      embedding: embedding,
+                      content_chunk: chunk,
+                      chunk_index: index,
+                    });
+                  if (vectorError) { // CHECK 4: Supabase insert error?
+                    console.error(`[UnifiedMessageService] Supabase vector insert ERROR for message ${createdMessageId}, chunk ${index + 1}:`, vectorError.message, vectorError); // DETAILED ERROR LOG
+                  } else { // CHECK 5: Supabase insert success!
+                    console.log(`[UnifiedMessageService] Vector successfully stored in Supabase for message ${createdMessageId}, chunk ${index + 1}.`); // SUCCESS LOG
+                  }
+                } catch (supaInsertError: unknown) { // CHECK 6: Exception during insert?
+                  const e = supaInsertError as Error;
+                  console.error(`[UnifiedMessageService] Supabase vector insert EXCEPTION for message ${createdMessageId}, chunk ${index + 1}:`, e.message, e.stack); // DETAILED EXCEPTION LOG
+                }
+              } else { // Embedding failed (returned null)
+                console.warn(`[UnifiedMessageService] Embedding FAILED (returned null) for chunk ${index + 1} of message ${createdMessageId}. Not storing in vector DB.`); // LOGGING
+              }
+            });
+          } else { // No chunks generated
+              console.warn(`[UnifiedMessageService] No chunks generated for message ID: ${createdMessageId}. Original content might be empty or too short to chunk effectively.`); // LOGGING
+          }
+        } 
+        return createdMessageId;
+      } else {
+        const created = await prisma.message.create({
+          data: {
+            userId: message.userId,
+            contactId: message.contactId,
+            platform: message.platform,
+            platformMessageId: message.platformMessageId,
+            content: message.content, // This is the content that will be embedded
+            timestamp: message.timestamp,
+            platformData: message.platformData as any 
+          }
+        });
+        createdMessageId = created.id;
       }
 
-      // Create new message
-      const created = await prisma.message.create({
-        data: {
-          userId: message.userId,
-          contactId: message.contactId,
-          platform: message.platform,
-          platformMessageId: message.platformMessageId,
-          content: message.content,
-          timestamp: message.timestamp,
-          platformData: message.platformData as any // Type assertion for Prisma JsonValue
+      // Asynchronous embedding logic after message is confirmed in DB (created or found)
+      if (supabaseAdmin && createdMessageId) {
+        // Determine text to embed
+        let textToEmbed = message.content;
+        const subject = message.platformData?.subject as string | undefined;
+        if (subject && typeof subject === 'string' && subject.trim() !== '') {
+          textToEmbed = `${subject}\n\n${message.content}`;
         }
-      })
 
-      return created.id
+        const chunks = chunkText({ text: textToEmbed }); // Uses default chunking params from embeddingUtils
+
+        if (chunks.length > 0) {
+          console.log(`[UnifiedMessageService] Processing ${chunks.length} chunks for message ID: ${createdMessageId}`);
+          chunks.forEach(async (chunk, index) => {
+            const embedding = await getEmbedding(chunk, message.userId);
+            if (embedding) {
+              try {
+                const { error: vectorError } = await supabaseAdmin
+                  .from('platform_message_embeddings')
+                  .insert({
+                    message_id: createdMessageId, 
+                    user_id: message.userId,
+                    contact_id: message.contactId || null, // Ensure contact_id is present or null
+                    embedding: embedding,
+                    content_chunk: chunk,
+                    chunk_index: index,
+                    // token_count: can be added if getEmbedding returns it or estimated
+                  });
+                if (vectorError) {
+                  console.error(`[UnifiedMessageService] Supabase vector insert error for message ${createdMessageId}, chunk ${index}:`, vectorError.message);
+                } else {
+                  // console.log(`[UnifiedMessageService] Vector stored for message ${createdMessageId}, chunk ${index}`);
+                }
+              } catch (supaInsertError: unknown) {
+                console.error(`[UnifiedMessageService] Exception inserting vector for message ${createdMessageId}, chunk ${index}:`, (supaInsertError as Error).message);
+              }
+            }
+          });
+        } else {
+            console.warn(`[UnifiedMessageService] No chunks generated for message ID: ${createdMessageId}. Original content might be empty or too short.`);
+        }
+      } else {
+        if (!supabaseAdmin) console.warn("[UnifiedMessageService] Supabase admin client not configured. Message vector not stored.");
+      }
+      return createdMessageId; // Return the ID of the created or existing message
+
     } catch (error) {
-      console.error('Failed to store message:', error)
-      throw error
+      console.error('Failed to store message or trigger embedding:', error);
+      // If createdMessageId was set before the error in embedding part, it might still be valid depending on desired behavior
+      // For now, rethrow to indicate failure in the broader process.
+      throw error;
     }
   }
 

@@ -58,10 +58,21 @@ export interface PlatformConfig {
 }
 
 /**
+ * Defines the structure for the result of a platform sync operation.
+ */
+export interface PlatformSyncResult {
+  success: boolean
+  messagesProcessed: number
+  newMessages: number
+  errors: string[]
+}
+
+/**
  * Platform adapter interface
  */
 export interface PlatformAdapter {
   platform: string
+  config: PlatformConfig;
   
   // Authentication
   isAuthenticated(userId: string): Promise<boolean>
@@ -77,12 +88,14 @@ export interface PlatformAdapter {
   }): Promise<PlatformMessage[]>
   
   // Sync capability
-  syncMessages(userId: string, contactId?: string): Promise<{
-    success: boolean
-    messagesProcessed: number
-    newMessages: number
-    errors: string[]
-  }>
+  syncMessages(userId: string, contactId?: string): Promise<PlatformSyncResult>
+
+  // Sending messages capability
+  sendMessage(userId: string, message: OutgoingMessage): Promise<{ 
+    success: boolean; 
+    platformMessageId?: string; // The ID of the message on the external platform
+    error?: string; 
+  }>;
 }
 
 /**

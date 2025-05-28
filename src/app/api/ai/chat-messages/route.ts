@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { verify } from 'jsonwebtoken';
 import { prisma } from '@/server/db';
-import OpenAI from 'openai';
 import { supabaseAdmin } from '@/lib/supabaseClient'; // Import Supabase admin client
+import { getEmbedding } from '@/lib/ai/embeddingUtils'; // Import from shared utils
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+// const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // No longer needed here
+// const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null; // No longer needed here
+// const EMBEDDING_MODEL = 'text-embedding-3-small'; // No longer needed here
 
 interface SaveMessageRequestBody {
   role: 'user' | 'assistant';
@@ -31,24 +32,6 @@ interface PrismaAiChatMessage {
     content: string;
     createdAt: Date;
     sessionId?: string | null;
-}
-
-async function getEmbedding(text: string, userIdForErrorLog: string): Promise<number[] | null> {
-  if (!openai) {
-    console.warn('[ChatMessagesAPI] OpenAI client not configured. Embedding generation skipped.');
-    return null;
-  }
-  try {
-    const response = await openai.embeddings.create({
-      model: "text-embedding-3-small", // Consistent with Supabase table dimension (e.g., 1536 for this model)
-      input: text.replace(/\n/g, ' '), 
-      encoding_format: "float",
-    });
-    return response.data[0]?.embedding || null;
-  } catch (error) {
-    console.error(`[ChatMessagesAPI] Error getting OpenAI embedding for user ${userIdForErrorLog}:`, error);
-    return null;
-  }
 }
 
 export async function GET(request: NextRequest) {
@@ -122,36 +105,37 @@ export async function POST(request: NextRequest) {
     });
 
     // Asynchronously generate embedding and save to Supabase vector table
-    if (supabaseAdmin && openai) { // Check if both Supabase admin and OpenAI clients are configured
+    if (supabaseAdmin) {
       getEmbedding(content, userId)
         .then(async (embedding) => {
           if (embedding) {
             try {
               const { error: vectorError } = await supabaseAdmin
-                .from('chat_embeddings') // Your Supabase table name
+                .from('ai_chat_message_embeddings') // Table name for AI chat message embeddings
                 .insert({
-                  message_id: newMessage.id, // Link to the AiChatMessage
+                  message_id: newMessage.id, 
                   user_id: userId,
                   embedding: embedding,
-                  // created_at is default in Supabase table
+                  content_chunk: content, // Store the full content as the "chunk" for now
+                  chunk_index: 0 // Default to 0 as we are not chunking yet
                 });
               if (vectorError) {
-                console.error("[ChatMessagesAPI] Supabase vector insert error for message:", newMessage.id, vectorError);
+                console.error("[ChatMessagesAPI] Supabase vector insert error for AiChatMessage:", newMessage.id, vectorError.message);
               } else {
-                console.log(`[ChatMessagesAPI] Vector stored in Supabase for message: ${newMessage.id}`);
+                console.log(`[ChatMessagesAPI] Vector stored in Supabase for AiChatMessage: ${newMessage.id}`);
               }
-            } catch (supaInsertError) {
-                 console.error("[ChatMessagesAPI] Exception upserting vector to Supabase for message:", newMessage.id, supaInsertError);
+            } catch (supaInsertError: unknown) {
+                 console.error("[ChatMessagesAPI] Exception upserting vector for AiChatMessage:", newMessage.id, (supaInsertError as Error).message);
             }
+          } else {
+             console.warn(`[ChatMessagesAPI] Embedding not generated for AiChatMessage ${newMessage.id}, not storing in vector DB.`);
           }
         })
         .catch(embeddingError => {
-            // This catch is for errors from getEmbedding promise itself, though getEmbedding already logs
-            console.error("[ChatMessagesAPI] Outer catch for getEmbedding promise failed:", embeddingError);
+            console.error("[ChatMessagesAPI] Error in getEmbedding promise chain for AiChatMessage:", (embeddingError as Error).message);
         });
     } else {
-      if (!supabaseAdmin) console.warn("[ChatMessagesAPI] Supabase admin client not configured. Vector not stored.");
-      if (!openai) console.warn("[ChatMessagesAPI] OpenAI client not configured. Vector not generated.");
+      console.warn("[ChatMessagesAPI] Supabase admin client not configured. AiChatMessage vector not stored.");
     }
 
     return NextResponse.json({ success: true, message: newMessage }, { status: 201 });

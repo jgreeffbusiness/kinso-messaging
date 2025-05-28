@@ -25,8 +25,8 @@ interface AssistantRequestBody {
 
 // This will be the structure we expect the LLM to (mostly) return in a parsable way
 interface LLMStructuredResponse {
-  action: 'FULFILL_INTENT' | 'REQUEST_INFO' | 'GENERAL_REPLY';
-  intent?: 'ADD_CONTACT' | 'DRAFT_EMAIL' | 'GET_CONTACT_DETAILS' | null;
+  action: 'FULFILL_INTENT' | 'REQUEST_INFO' | 'GENERAL_REPLY' | 'SEARCH_USER_DATA';
+  intent?: 'ADD_CONTACT' | 'DRAFT_EMAIL' | 'GET_CONTACT_DETAILS' | 'SEARCH_USER_DATA' | null;
   data?: Record<string, unknown>; // Changed from any
   reply_to_user: string; // The text AI should say
   missing_entities?: string[];
@@ -49,6 +49,11 @@ Available actions you can fulfill or gather information for:
    - Required information: contact name.
    - User might say: "show me details for jane doe", "who is john smith?", "lookup sarah connor".
    - If the name is ambiguous and multiple contacts are found, ask the user to clarify which one.
+4. SEARCH_USER_DATA:
+   - Triggered when the user asks a question that requires looking up information from their past messages (emails, Slack), or AI chat history.
+   - Examples: "What did [person] say about [topic]?", "Find the email regarding [subject]", "When was my last chat about [project]?", "Summarize my conversation with [contact] about [topic]".
+   - Required information: The core search query (e.g., "[person] [topic]", "[subject]", "[project]", "[contact] [topic]").
+   - Your job is to identify this intent and extract the essential \`search_query\` string.
 
 Interaction Flow:
 - User provides an initial request.
@@ -68,6 +73,9 @@ Example FULFILL_INTENT for GET_CONTACT_DETAILS (when contact is found by backend
 
 Example REQUEST_INFO for GET_CONTACT_DETAILS (if name is ambiguous and backend finds multiple):
 { "action": "REQUEST_INFO", "intent_context": {"current_intent": "GET_CONTACT_DETAILS", "original_name_query": "Jane"}, "missing_entities": ["clarification_of_contact"], "reply_to_user": "I found multiple contacts named Jane: Jane Doe and Jane Roe. Which one did you mean?" }
+
+Example FULFILL_INTENT for SEARCH_USER_DATA:
+{ "action": "FULFILL_INTENT", "intent": "SEARCH_USER_DATA", "data": { "search_query": "Braith boat charter" }, "reply_to_user": "Okay, I'll search your data for information about 'Braith boat charter'..." }
 
 Strive to return responses in the specified JSON format when an action or information request is identified.
 If you are just having a general conversation or cannot identify a clear action, your response can be plain text or use {"action": "GENERAL_REPLY", "reply_to_user": "..."}.
@@ -299,6 +307,45 @@ export async function POST(request: NextRequest) {
           } catch (dbError: unknown) {
             console.error("[AI Assistant Handler] DB error getting contact details:", dbError);
             parsedLlmResponse.reply_to_user = `Sorry, I encountered an error trying to look up contact details: ${(dbError as Error).message}`;
+          }
+          break;
+        case 'SEARCH_USER_DATA':
+          try {
+            const searchQuery = intentData.search_query as string;
+            if (!searchQuery) {
+              throw new Error('Search query is missing for SEARCH_USER_DATA intent.');
+            }
+
+            console.log(`[AI Assistant] SEARCH_USER_DATA: User input: "${userInput}", Extracted search: "${searchQuery}"`);
+            
+            // Make an internal call to the semantic search API
+            const searchApiUrl = new URL('/api/ai/semantic-search', request.url).toString();
+            
+            const searchServiceResponse = await fetch(searchApiUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Cookie': request.headers.get('cookie') || '' 
+              },
+              body: JSON.stringify({ query: searchQuery })
+            });
+
+            if (!searchServiceResponse.ok) {
+              const errorData = await searchServiceResponse.json().catch(() => ({ error: "Failed to parse search API error response" }));
+              console.error("[AI Assistant Handler] Semantic Search API call failed:", searchServiceResponse.status, errorData);
+              throw new Error(`Search service failed: ${errorData.error || searchServiceResponse.statusText}`);
+            }
+
+            const searchResult = await searchServiceResponse.json();
+            
+            parsedLlmResponse.reply_to_user = searchResult.answer || "I looked through your data but couldn't formulate a specific answer to that.";
+            
+            // For debugging, you might want to include the snippets in the response if your frontend can handle it
+            // parsedLlmResponse.data.retrieved_snippets = searchResult.debug_retrieved_snippets;
+
+          } catch (searchError: unknown) {
+            console.error("[AI Assistant Handler] Error during SEARCH_USER_DATA:", searchError);
+            parsedLlmResponse.reply_to_user = `Sorry, I encountered an error while searching your data: ${(searchError as Error).message}`;
           }
           break;
         default:

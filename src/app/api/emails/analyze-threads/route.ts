@@ -79,21 +79,41 @@ export async function POST(request: NextRequest) {
     for (const [threadId, threadMessages] of threadsMap) {
       if (threadMessages.length === 0) continue
 
-      // Convert to thread processor format
       const formattedMessages = threadMessages.map(msg => {
-        // Extract sender info from platformData
-        let from = user.email || 'unknown@example.com'
-        let isFromUser = true
+        let fromEmailString = user.email || 'unknown@example.com'; // Default to user's email for 'from' field
+        let isFromUser = true; // Default to true if we can't determine sender or it is the user
         
         if (msg.platformData && typeof msg.platformData === 'object') {
-          const data = msg.platformData as Record<string, unknown>
-          from = (data.from as string) || (data.sender as string) || from
-          isFromUser = from.toLowerCase().includes((user.email || '').toLowerCase())
+          const data = msg.platformData as Record<string, unknown>;
+          let extractedSenderIdentifier: string | undefined = undefined;
+
+          // Attempt to get email string from data.from or data.sender
+          if (typeof data.from === 'string') {
+            extractedSenderIdentifier = data.from;
+          } else if (typeof data.from === 'object' && data.from !== null && typeof (data.from as { email?: string }).email === 'string') {
+            extractedSenderIdentifier = (data.from as { email: string }).email;
+          } else if (typeof data.sender === 'string') {
+            extractedSenderIdentifier = data.sender;
+          } else if (typeof data.sender === 'object' && data.sender !== null && typeof (data.sender as { email?: string }).email === 'string') {
+            extractedSenderIdentifier = (data.sender as { email: string }).email;
+          }
+
+          if (extractedSenderIdentifier) {
+            fromEmailString = extractedSenderIdentifier; // This will be used as the 'from' field in formattedMessage
+            // Now determine if this fromEmailString belongs to the user
+            isFromUser = fromEmailString.toLowerCase().includes((user.email || '').toLowerCase());
+          } else {
+            // If no identifiable sender email, assume it might be from user (or keep default fromEmailString as user.email)
+            // isFromUser remains true as per initialization if user.email is the fromEmailString
+            isFromUser = (user.email || '').toLowerCase() === fromEmailString.toLowerCase();
+          }
+        } else {
+            // No platformData, fromEmailString remains user.email, isFromUser remains true
         }
 
         return {
           id: msg.platformMessageId,
-          from: from,
+          from: fromEmailString, // Use the derived email string
           to: [contact.email || 'unknown@example.com'],
           subject: (msg.platformData as Record<string, unknown>)?.subject as string || 'Email conversation',
           content: msg.content,
