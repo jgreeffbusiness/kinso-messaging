@@ -5,10 +5,6 @@ import { prisma } from '@/server/db';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
-interface CommandRequestBody {
-  command: string;
-}
-
 interface CommandResponse {
   message: string;
   details?: Record<string, unknown>;
@@ -25,6 +21,17 @@ interface ParsedContactDetails {
   email?: string;
   phone?: string;
   hasMinimalInfo?: boolean; // True if at least email or phone is present with name
+}
+
+interface AiContextFromClient {
+  intentContext?: string;
+  contactName?: string;
+  [key: string]: unknown;
+}
+
+interface CommandRequestBodyWithContext {
+  command: string;
+  context?: AiContextFromClient | null;
 }
 
 function parseAddContactCommand(command: string): ParsedContactDetails | null {
@@ -81,6 +88,22 @@ function parseAddContactCommand(command: string): ParsedContactDetails | null {
   return { name: name || undefined, email, phone, hasMinimalInfo }; // Ensure name is not empty string if it was truthy before
 }
 
+function parseContactDetailsFromReply(command: string): { email?: string; phone?: string } {
+  let email: string | undefined;
+  let phone: string | undefined;
+
+  const emailMatch = command.match(/email\s+([\w\.-]+@[\w\.-]+\.\w+)/i) || command.match(/([\w\.-]+@[\w\.-]+\.\w+)/i); // More general email match
+  if (emailMatch && emailMatch[1]) {
+    email = emailMatch[1].trim();
+  }
+
+  const phoneMatch = command.match(/phone(?:\s+number)?\s+([\d\s\-\(\)]+)/i) || command.match(/([\d\s\-\(\)]+)/i); // More general phone match
+  if (phoneMatch && phoneMatch[1]) {
+    phone = phoneMatch[1].replace(/\D/g, '');
+  }
+  return { email, phone };
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse<CommandResponse>> {
   try {
     const cookieStore = await cookies();
@@ -91,39 +114,71 @@ export async function POST(request: NextRequest): Promise<NextResponse<CommandRe
     const userId = decoded.userId;
     if (!userId) return NextResponse.json({ error: 'User ID not found' } as CommandResponse, { status: 401 });
 
-    const body = await request.json() as CommandRequestBody;
-    const { command } = body;
+    const body = await request.json() as CommandRequestBodyWithContext;
+    const { command, context: incomingContext } = body;
     if (!command || typeof command !== 'string') {
       return NextResponse.json({ error: 'Invalid command provided' } as CommandResponse, { status: 400 });
     }
 
-    console.log(`[AI Command Handler] Received command: "${command}" for user ${userId}`);
+    console.log(`[AI Command Handler] Cmd: "${command}", Context:`, incomingContext);
 
-    const contactDetails = parseAddContactCommand(command);
-
-    if (contactDetails && contactDetails.name) {
-      if (!contactDetails.hasMinimalInfo && !contactDetails.email && !contactDetails.phone) {
-        // Name found, but no email or phone - ask for follow-up
+    // --- Handle Follow-up for ADD_CONTACT --- 
+    if (incomingContext && incomingContext.intentContext === 'ADD_CONTACT' && incomingContext.contactName) {
+      const nameFromContext = incomingContext.contactName as string;
+      console.log(`[AI Command Handler] Follow-up for ADD_CONTACT, name: ${nameFromContext}`);
+      const additionalDetails = parseContactDetailsFromReply(command);
+      
+      if (!additionalDetails.email && !additionalDetails.phone) {
         return NextResponse.json({
-          message: `Okay, I can add ${contactDetails.name}. What is their email or phone number?`,
-          followUpQuestion: 'ASK_CONTACT_DETAILS', // Frontend can use this to know what kind of follow-up is expected
-          details: { intentContext: 'ADD_CONTACT', contactName: contactDetails.name } // Pass context back
+          message: `Okay, I have the name ${nameFromContext}. I still need an email or phone number. Can you provide one?`,
+          followUpQuestion: 'ASK_CONTACT_DETAILS', // Still asking
+          details: incomingContext // Pass context back again
+        });
+      }
+
+      try {
+        const newContact = await prisma.contact.create({
+          data: {
+            userId: userId,
+            fullName: nameFromContext,
+            email: additionalDetails.email,
+            phoneNumber: additionalDetails.phone,
+            source: 'voice_assistant'
+          }
+        });
+        return NextResponse.json({
+          message: `Got it! Contact "${newContact.fullName}" added with the details provided.`, 
+          details: { contactId: newContact.id }
+        });
+      } catch (dbError: unknown) {
+        console.error("[AI Command Handler] DB error creating contact:", dbError);
+        return NextResponse.json({ error: `Failed to add contact: ${(dbError as Error).message}` } as CommandResponse, { status: 500 });
+      }
+    }
+
+    // --- Initial Intent: Add Contact ---
+    const initialContactDetails = parseAddContactCommand(command);
+    if (initialContactDetails && initialContactDetails.name) {
+      if (!initialContactDetails.hasMinimalInfo && !initialContactDetails.email && !initialContactDetails.phone) {
+        return NextResponse.json({
+          message: `Okay, I can add ${initialContactDetails.name}. What is their email or phone number?`,
+          followUpQuestion: 'ASK_CONTACT_DETAILS', 
+          details: { intentContext: 'ADD_CONTACT', contactName: initialContactDetails.name }
         });
       } else {
-        // Name and at least email or phone found, proceed to create
         try {
           const newContact = await prisma.contact.create({
             data: {
               userId: userId,
-              fullName: contactDetails.name,
-              email: contactDetails.email,
-              phoneNumber: contactDetails.phone,
+              fullName: initialContactDetails.name,
+              email: initialContactDetails.email,
+              phoneNumber: initialContactDetails.phone,
               source: 'voice_assistant' 
             }
           });
           return NextResponse.json({
             message: `Contact "${newContact.fullName}" added successfully.`, 
-            details: { contactId: newContact.id, ...contactDetails }
+            details: { contactId: newContact.id, ...initialContactDetails }
           });
         } catch (dbError: unknown) {
           console.error("[AI Command Handler] DB error creating contact:", dbError);

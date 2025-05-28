@@ -32,6 +32,7 @@ model User {
   messages           Message[]
   notes              Note[]
   pendingApprovals   PendingContactApproval[]
+  aiChatMessages     AiChatMessage[]
 }
 
 model Contact {
@@ -48,10 +49,13 @@ model Contact {
   platformData    Json?
   source          String?
   updatedAt       DateTime         @updatedAt
+  status          String           @default("ACTIVE") // e.g., ACTIVE, PENDING_MERGE_REVIEW, ARCHIVED_AS_DUPLICATE
   user            User             @relation(fields: [userId], references: [id])
   contactMessages ContactMessage[]
   messages        Message[]
   notes           Note[]
+  embedding       Unsupported("vector(1536)")?
+  @@index([userId, status]) // Good for querying active contacts per user
 }
 
 model Message {
@@ -60,7 +64,7 @@ model Message {
   contactId         String
   platform          String
   timestamp         DateTime  // External platform's original message timestamp
-  content           String
+  content           String    @db.Text // Text to be chunked and embedded
   platformData      Json?
   platformMessageId String
   readAt            DateTime?
@@ -97,16 +101,13 @@ model ContactMessage {
 
 model Note {
   id        String   @id @default(cuid())
-  content   String
+  content   String   @db.Text // Text to be chunked and embedded
   contactId String
   userId    String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([contactId])
-  @@index([userId])
 }
 
 model PendingContactApproval {
@@ -123,6 +124,7 @@ model PendingContactApproval {
   createdAt        DateTime         @default(now())
   user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages         PendingMessage[]
+  embedding        Unsupported("vector(1536)")?
 
   @@index([userId])
   @@index([platform])
@@ -155,4 +157,17 @@ model BlacklistedSender {
   @@unique([userId, platform, senderHandle])
   @@index([userId])
   @@index([platform])
+}
+
+model AiChatMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String  
+  content   String   @db.Text // Text to be chunked and embedded
+  createdAt DateTime @default(now())
+  sessionId String?
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([sessionId])
 }

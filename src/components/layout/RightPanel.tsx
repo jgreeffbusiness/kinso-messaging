@@ -19,26 +19,35 @@ import {
   Sparkles,
   Eye,
   CheckCircle,
-  AlertTriangle
+  AlertTriangle,
+  Loader2
 } from 'lucide-react'
 import { SuggestedAction, ThreadAnalysis } from '@/lib/thread-processor'
 import { toast } from 'sonner'
 
 // Interface for response from /api/ai/command-handler
-interface CommandHandlerResponse {
-  message: string;
-  details?: Record<string, unknown>;
-  error?: string;
-  followUpQuestion?: string; 
-  actionToFulfill?: { 
-    type: string; 
-    data: Record<string, unknown>;
-  }
-}
+// interface CommandHandlerResponse { /* ... */ }
 
 // Interface for response from /api/ai/chat-handler (assuming it returns a 'reply')
-interface ChatHandlerResponse {
-  reply: string;
+// interface ChatHandlerResponse { /* ... */ }
+
+// Interface for what AI Assistant API expects and returns for context
+interface AiAssistantContext {
+  current_intent?: 'ADD_CONTACT' | 'DRAFT_EMAIL' | string; // Allow for other intents
+  name?: string;
+  email?: string;
+  phone?: string;
+  recipient?: string;
+  subject?: string;
+  bodyHint?: string;
+  [key: string]: unknown; // Changed from any to unknown
+}
+
+interface AiAssistantApiResponse {
+  message: string; // This is the reply_to_user
+  details?: AiAssistantContext | Record<string, unknown>; // This can hold the intent_context for next turn or fulfillment data
+  followUpQuestion?: string; // If present, indicates API is asking for more info
+  actionToFulfill?: { type: string; data: Record<string, unknown>; };
   error?: string;
 }
 
@@ -48,10 +57,12 @@ export function RightPanel() {
     setInputValue, 
     messages: chatMessages,
     addMessage,
+    updateMessageId,
     aiIsResponding,
     setAiIsResponding,
     aiConversationContext,
-    setAiConversationContext
+    setAiConversationContext,
+    isLoadingHistory
   } = useChat()
 
   const { activeItem } = useActiveFocus()
@@ -130,86 +141,102 @@ export function RightPanel() {
     }
   }
 
+  const persistMessage = async (role: 'user' | 'assistant', content: string, tempIdToUpdate?: string) => {
+    try {
+      const response = await fetch('/api/ai/chat-messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role, content }),
+      });
+      if (response.ok) {
+        const savedMsgData = await response.json();
+        if (savedMsgData.success && savedMsgData.message && tempIdToUpdate) {
+          updateMessageId(tempIdToUpdate, savedMsgData.message.id);
+        } else if (!savedMsgData.success) {
+            console.warn("Failed to save message to DB:", savedMsgData.error);
+            // Optionally toast a non-blocking warning for the user
+        }
+      } else {
+        const errorData = await response.json();
+        console.warn("Error response saving message to DB:", errorData.error);
+      }
+    } catch (error) {
+      console.error("Network error saving message:", error);
+      // Optionally toast a non-blocking warning
+    }
+  };
+
   const handleChatSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const currentInput = inputValue.trim();
     if (!currentInput) return;
 
-    addMessage({ content: currentInput, sender: 'user', createdAt: new Date().toISOString() });
-    const previousContext = aiConversationContext;
+    const userTempId = addMessage({ content: currentInput, role: 'user' });
+    const currentConversationHistory = [...chatMessages, 
+      {id: userTempId, content: currentInput, role: 'user', createdAt: new Date().toISOString()}]
+        .map(msg => ({ role: msg.role, content: msg.content }));
+    
+    persistMessage('user', currentInput, userTempId);
+
+    const contextToSend = aiConversationContext; 
     setInputValue('');
-    setAiConversationContext(null);
+    setAiConversationContext(null); 
     setAiIsResponding(true);
 
     let assistantResponseText = "I'm sorry, I encountered an issue processing that.";
-    let commandActionToFulfill: CommandHandlerResponse['actionToFulfill'] = undefined;
-    let nextAiConversationContext: CommandHandlerResponse['details'] = undefined;
-
-    const commandLower = currentInput.toLowerCase();
-    const isLikelyCommand = previousContext?.intentContext === 'ADD_CONTACT' || 
-                            commandLower.startsWith('add contact') || 
-                            commandLower.startsWith('create contact') || 
-                            commandLower.startsWith('send email');
+    let actionToFulfillOnClient: AiAssistantApiResponse['actionToFulfill'] = undefined;
+    let nextIntentContext: AiAssistantContext | null = null;
 
     try {
-      if (isLikelyCommand) {
-        console.log("[RightPanel] Routing to command-handler with input:", currentInput, "and context:", previousContext);
-        const response = await fetch('/api/ai/command-handler', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: currentInput, context: previousContext }),
-        });
-        const data: CommandHandlerResponse = await response.json();
-        if (!response.ok || data.error) {
-          throw new Error(data.error || 'Command handler request failed');
-        }
-        assistantResponseText = data.message;
-        commandActionToFulfill = data.actionToFulfill;
-        if (data.followUpQuestion) {
-          nextAiConversationContext = data.details;
-        }
-      } else {
-        console.log("[RightPanel] Routing to chat-handler for:", currentInput);
-        const response = await fetch('/api/ai/chat-handler', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userInput: currentInput,
-            conversationContext: aiContext,
-            activeItemType: activeItem?.type,
-            activeItemData: activeItem?.type !== 'message_id_only' ? activeItem?.data : { id: activeItem?.id }
-          }),
-        });
-        const data = await response.json() as ChatHandlerResponse;
-        if (!response.ok) {
-            throw new Error(data.error || 'Chat handler API request failed');
-        }
-        assistantResponseText = data.reply;
+      const response = await fetch('/api/ai/assistant-handler', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userInput: currentInput,
+          conversationHistory: currentConversationHistory,
+          currentIntentContext: contextToSend
+        }),
+      });
+      const data: AiAssistantApiResponse = await response.json();
+      
+      if (!response.ok || data.error) {
+        throw new Error(data.error || 'AI assistant request failed');
       }
+      assistantResponseText = data.message;
+      actionToFulfillOnClient = data.actionToFulfill;
+      if (data.followUpQuestion && data.details) {
+        nextIntentContext = data.details as AiAssistantContext;
+        console.log("[RightPanel] API expects follow-up. New intent_context for next turn:", nextIntentContext);
+      } else {
+        console.log("[RightPanel] API does not expect follow-up. Context will be cleared/remain null.");
+      }
+
     } catch (error: unknown) {
-      console.error("AI Handler API error:", error);
+      console.error("AI Assistant API error:", error);
       assistantResponseText = error instanceof Error ? error.message : "An unexpected error occurred with the AI.";
+      nextIntentContext = null;
     }
 
-    addMessage({ content: assistantResponseText, sender: 'assistant', createdAt: new Date().toISOString() });
+    const assistantTempId = addMessage({ content: assistantResponseText, role: 'assistant' });
+    persistMessage('assistant', assistantResponseText, assistantTempId);
     
-    if (commandActionToFulfill?.type === 'DRAFT_EMAIL') {
-      const recipient = commandActionToFulfill.data.recipient as string || '';
-      const subject = commandActionToFulfill.data.subject as string || '';
-      const bodyHint = commandActionToFulfill.data.bodyHint as string || '';
+    setAiConversationContext(nextIntentContext);
+    
+    if (actionToFulfillOnClient?.type === 'DRAFT_EMAIL') {
+      const recipient = actionToFulfillOnClient.data.recipient as string || '';
+      const subject = actionToFulfillOnClient.data.subject as string || '';
+      const bodyHint = actionToFulfillOnClient.data.bodyHint as string || '';
       const mailto = `mailto:${recipient}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyHint + '\n\n(Drafted by AI Assistant)')}`;
-      toast.info("Your email draft is ready to review.", {
-        description: `To: ${recipient}, Subject: ${subject}`,
+      toast.info("Your email draft is ready.", {
+        description: `To: ${recipient}`,
         action: { label: "Open Email Client", onClick: () => window.open(mailto, '_blank') }
       });
     }
-
-    setAiConversationContext(nextAiConversationContext || null);
     setAiIsResponding(false);
   };
 
   return (
-    <div className="border-l w-96 flex flex-col bg-background">
+    <div className="border-l w-96 flex flex-col bg-background h-full">
       <div className="flex items-center p-4 border-b">
         <h3 className="font-medium flex items-center gap-2">
           <Brain className="h-5 w-5 text-primary" />
@@ -217,140 +244,37 @@ export function RightPanel() {
         </h3>
       </div>
       
-      <div className="flex-1 overflow-y-auto">
-        {activeItem ? (
-          <div className="p-4 border-b bg-muted/50">
-            {aiLoading ? (
-              <div className="flex items-center justify-center py-4">
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Sparkles className="h-4 w-4 animate-pulse" />
-                  Analyzing...
-                </div>
-              </div>
-            ) : aiError ? (
-              <div className="text-center py-4 text-destructive-foreground bg-destructive/90 p-3 rounded-md">
-                <AlertTriangle className="h-5 w-5 mx-auto mb-1" />
-                <p className="text-xs">Error loading AI insights: {aiError}</p>
-              </div>
-            ) : aiContext ? (
-              <div className="space-y-4">
-                <div className="space-y-1.5">
-                  <div className="flex items-center gap-2 text-sm flex-wrap">
-                    <Badge variant="outline" className={cn("text-xs font-semibold px-2 py-1", getUrgencyColor(aiContext.urgency))}>
-                      {aiContext.urgency?.toUpperCase() || 'N/A'}
-                    </Badge>
-                    {aiContext.threadType && <Badge variant="outline" className="text-xs">{aiContext.threadType.replace(/_/g, ' ')}</Badge>}
-                  </div>
-                  {aiContext.currentStatus && typeof aiContext.currentStatus === 'string' && (
-                    <p className="text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">Status:</span> {aiContext.currentStatus.replace(/_/g, ' ')}
-                    </p>
-                  )}
-                  {aiContext.unresponded?.hasUnrespondedMessages && aiContext.unresponded.unrespondedCount > 0 && (
-                    <p className="text-xs text-amber-700">
-                      <AlertTriangle size={12} className="inline mr-1 mb-0.5" />
-                      {aiContext.unresponded.unrespondedCount} new message{aiContext.unresponded.unrespondedCount > 1 ? 's' : ''} since your last reply ({aiContext.unresponded.daysSinceLastUserReply}d ago).
-                    </p>
-                  )}
-                </div>
-
-                <div>
-                  <h4 className="text-sm font-semibold mb-1 text-foreground">Summary</h4>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {aiContext.summary}
-                  </p>
-                </div>
-
-                {aiContext.unresponded?.hasUnrespondedMessages && Array.isArray(aiContext.unreadHighlights) && aiContext.unreadHighlights.length > 0 && (
-                  <div>
-                    <h4 className="text-sm font-semibold mb-1 text-foreground">Recent Updates:</h4>
-                    <ul className="space-y-1 list-disc list-inside pl-1">
-                      {aiContext.unreadHighlights.slice(0, 3).map((highlight: string, index: number) => (
-                        <li key={`highlight-${index}`} className="text-sm text-muted-foreground">
-                          {highlight}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {Array.isArray(aiContext.keyInsights) && aiContext.keyInsights.length > 0 && (
-                  <div>
-                    <h4 className="text-sm font-semibold mb-1 text-foreground">Key Insights</h4>
-                    <ul className="space-y-1.5">
-                      {aiContext.keyInsights.slice(0, 3).map((insight: string, index: number) => (
-                        <li key={index} className="text-sm text-muted-foreground flex items-start gap-2">
-                          <span className="w-1.5 h-1.5 bg-primary/70 rounded-full mt-[6px] flex-shrink-0"></span>
-                          <span>{insight}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {Array.isArray(aiContext.actionItems) && aiContext.actionItems.length > 0 && 
-                 !(aiContext.actionItems.length === 1 && aiContext.actionItems[0]?.type === 'no-action') && (
-                  <div>
-                    <h4 className="text-sm font-semibold mb-1.5 text-foreground">Suggested Actions</h4>
-                    <div className="space-y-2">
-                      {aiContext.actionItems.slice(0, 3).map((action: SuggestedAction, index: number) => (
-                        action.type === 'no-action' ? null : (
-                          <Button
-                            key={action.id || `action-${index}`}
-                            variant="outline"
-                            size="sm"
-                            className="w-full justify-start gap-2 h-auto p-2 text-sm hover:bg-primary/5 hover:border-primary/30"
-                            onClick={() => handleAIAction(action)}
-                          >
-                            {getActionIcon(action.type)}
-                            <span className="flex-1 text-left truncate min-w-0 font-medium">{action.title}</span>
-                            {action.confidence !== undefined && (
-                              <Badge variant="secondary" className="text-xs">
-                                {Math.round(action.confidence * 100)}%
-                              </Badge>
-                            )}
-                          </Button>
-                        )
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="text-center py-4 text-muted-foreground text-sm">
-                <MessageSquare className="h-6 w-6 mx-auto mb-2 opacity-50" />
-                <p>No AI insights for this item, or item not fully analyzed.</p>
-              </div>
-            )}
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {isLoadingHistory ? (
+          <div className="flex justify-center items-center h-full">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            <p className="ml-2 text-muted-foreground">Loading chat history...</p>
           </div>
         ) : (
-          <div className="p-4 text-center text-sm text-muted-foreground">
-             Select an item from the dashboard or messages to see AI insights.
+          chatMessages.map(message => {
+            // console.log("Rendering message:", message); // DEBUG: Check message object structure and role
+            return (
+              <div 
+                key={message.id} 
+                className={cn(
+                  "p-3 rounded-lg break-words text-sm shadow-sm max-w-[85%]", // Common styles
+                  message.role === "assistant" 
+                    ? "bg-muted self-start text-foreground" // Ensure assistant has contrasting text
+                    : "bg-primary text-primary-foreground self-end" // User styles
+                )}
+              >
+                <p>{message.content}</p>
+              </div>
+            );
+          })
+        )}
+        {aiIsResponding && (
+          <div className="p-3 rounded-lg break-words text-sm shadow-sm bg-muted self-start max-w-[85%]">
+            <p className="text-muted-foreground italic flex items-center">
+              <Sparkles size={14} className="mr-2 animate-pulse" /> AI is thinking...
+            </p>
           </div>
         )}
-
-        <div className="flex-grow flex flex-col justify-end p-4 space-y-3">
-          {chatMessages.map(message => (
-            <div 
-              key={message.id} 
-              className={cn(
-                "p-3 rounded-lg break-words text-sm shadow-sm",
-                message.sender === "assistant" 
-                  ? "bg-muted self-start max-w-[85%]"
-                  : "bg-primary text-primary-foreground self-end max-w-[85%]"
-              )}
-            >
-              <p>{message.content}</p>
-            </div>
-          ))}
-          {aiIsResponding && (
-            <div className="p-3 rounded-lg break-words text-sm shadow-sm bg-muted self-start max-w-[85%]">
-              <p className="text-muted-foreground italic flex items-center">
-                <Sparkles size={14} className="mr-2 animate-pulse" /> AI is thinking...
-              </p>
-            </div>
-          )}
-        </div>
       </div>
       
       <div className="p-3 border-t bg-background">

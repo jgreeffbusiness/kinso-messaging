@@ -318,16 +318,14 @@ export class ContactUnificationService {
   public async createUnifiedContact(
     platformContact: PlatformContact,
     platform: string,
-    userId: string
+    userId: string,
+    initialStatus: string = "ACTIVE"
   ): Promise<string> {
-    
-    // Clean platform data - remove undefined values
     const cleanedMetadata = platformContact.platformSpecific 
       ? Object.fromEntries(
           Object.entries(platformContact.platformSpecific).filter(([_key, value]) => value !== undefined)
         )
-      : {}
-    
+      : {};
     const platformData = {
       [platform]: {
         platformContactId: platformContact.id,
@@ -337,20 +335,20 @@ export class ContactUnificationService {
         metadata: cleanedMetadata,
         addedAt: new Date().toISOString()
       }
-    }
-    
+    };
     const contact = await prisma.contact.create({
       data: {
         userId,
         fullName: platformContact.name,
         email: platformContact.email,
         photoUrl: platformContact.avatar,
-        platformData: platformData as Prisma.InputJsonValue
+        platformData: platformData as Prisma.InputJsonValue,
+        status: initialStatus,
+        source: platform
       }
-    })
-    
-    console.log(`Created new unified contact ${contact.id} for ${platform} contact ${platformContact.id}`)
-    return contact.id
+    });
+    console.log(`Created new unified contact ${contact.id} (Status: ${initialStatus}) for ${platform} contact ${platformContact.id}`);
+    return contact.id;
   }
 
   /**
@@ -361,23 +359,13 @@ export class ContactUnificationService {
     platformContact: PlatformContact,
     platform: string
   ): Promise<void> {
+    const contact = await prisma.contact.findUnique({ where: { id: contactId }});
+    if (!contact) return;
     
-    const contact = await prisma.contact.findUnique({
-      where: { id: contactId }
-    })
-    
-    if (!contact) return
-    
-    const existingPlatformData = (contact.platformData as Record<string, unknown>) || {}
-    
-    // Clean platform data - remove undefined values
+    const existingPlatformData = (contact.platformData as Record<string, unknown>) || {};
     const cleanedMetadata = platformContact.platformSpecific 
-      ? Object.fromEntries(
-          Object.entries(platformContact.platformSpecific).filter(([_key, value]) => value !== undefined)
-        )
-      : {}
-    
-    // Add or update platform identity
+      ? Object.fromEntries(Object.entries(platformContact.platformSpecific).filter(([_key, value]) => value !== undefined))
+      : {};
     existingPlatformData[platform] = {
       platformContactId: platformContact.id,
       handle: platformContact.handle || null,
@@ -385,25 +373,15 @@ export class ContactUnificationService {
       name: platformContact.name,
       metadata: cleanedMetadata,
       addedAt: new Date().toISOString()
+    };
+    const updates: Prisma.ContactUpdateInput = { platformData: existingPlatformData as Prisma.InputJsonValue };
+    if (!contact.email && platformContact.email) updates.email = platformContact.email;
+    if (!contact.photoUrl && platformContact.avatar) updates.photoUrl = platformContact.avatar;
+    if (contact.status !== 'ACTIVE') {
+        updates.status = 'ACTIVE';
     }
-    
-    // Update primary contact info if platform has better data
-    const updates: Record<string, unknown> = { platformData: existingPlatformData }
-    
-    if (!contact.email && platformContact.email) {
-      updates.email = platformContact.email
-    }
-    
-    if (!contact.photoUrl && platformContact.avatar) {
-      updates.photoUrl = platformContact.avatar
-    }
-    
-    await prisma.contact.update({
-      where: { id: contactId },
-      data: updates
-    })
-    
-    console.log(`Added ${platform} identity to unified contact ${contactId}`)
+    await prisma.contact.update({ where: { id: contactId }, data: updates });
+    console.log(`Added ${platform} identity to unified contact ${contactId}. Status ensured ACTIVE.`);
   }
 
   /**
@@ -499,13 +477,13 @@ export class ContactUnificationService {
     
     if (!bestMatch || bestMatch.score < autoCreateThreshold) {
       console.log(`[AutoProcess] No strong match for ${platformContact.name} from ${platformKey}. Creating new. (Best score: ${bestMatch?.score || 'N/A'})`);
-      const newUnifiedContactId = await this.createUnifiedContact(platformContact, platformKey, userId);
+      const newUnifiedContactId = await this.createUnifiedContact(platformContact, platformKey, userId, 'ACTIVE');
       return { action: 'auto_created_new', unifiedContactId: newUnifiedContactId, details: `Created new contact` };
     }
     
-    // Ambiguous Match: Create new contact, then create a PendingContactApproval record for MERGE_REVIEW
-    console.log(`[AutoProcess] Ambiguous match for ${platformContact.name} from ${platformKey} (Match: ${bestMatch.fullName}, Score: ${bestMatch.score}). Creating new and submitting for merge review.`);
-    const newUnifiedContactIdForReview = await this.createUnifiedContact(platformContact, platformKey, userId);
+    // Ambiguous Match: Create new contact with PENDING_MERGE_REVIEW status, then flag for duplicate review
+    console.log(`[AutoProcess] Ambiguous match for ${platformContact.name} from ${platformKey} (Match: ${bestMatch.fullName}, Score: ${bestMatch.score}). Creating new with PENDING_MERGE_REVIEW status.`);
+    const newUnifiedContactIdForReview = await this.createUnifiedContact(platformContact, platformKey, userId, 'PENDING_MERGE_REVIEW');
     
     try {
       // Populate fields for PendingContactApproval based on an ambiguous merge scenario
