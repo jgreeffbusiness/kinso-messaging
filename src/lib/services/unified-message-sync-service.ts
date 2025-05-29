@@ -132,7 +132,22 @@ export class UnifiedMessageSyncService {
    * Sync Slack platform for a user
    */
   private async syncSlackForUser(userId: string): Promise<SyncResult> {
-    console.log(`Syncing Slack for user ${userId}`)
+    console.log(`[UnifiedMessageSyncService] Syncing Slack for user ${userId}`)
+
+    const syncCheck = await syncStateManager.shouldDoIncrementalSync(userId, 'slack');
+    if (!syncCheck.shouldSync) {
+      console.log(`[UnifiedMessageSyncService] Slack sync skipped for user ${userId}: ${syncCheck.reason}`);
+      return {
+        platform: 'slack',
+        contactsProcessed: 0,
+        contactsCreated: 0,
+        contactsMatched: 0,
+        messagesProcessed: 0,
+        newMessages: 0,
+        errors: []
+      };
+    }
+    console.log(`[UnifiedMessageSyncService] Proceeding with Slack sync for ${userId}. Reason: ${syncCheck.reason}`);
     
     const slackAdapter = new SlackAdapter()
     
@@ -148,6 +163,7 @@ export class UnifiedMessageSyncService {
     let messagesProcessed = 0
     let newMessages = 0
     const errors: string[] = []
+    let latestMessageTimestampInBatch: Date | undefined = undefined;
 
     try {
       // Check if we already have Slack contacts for this user
@@ -220,15 +236,21 @@ export class UnifiedMessageSyncService {
       }
 
       // Step 2: Focus on syncing messages from known contacts
-      console.log(`Fetching Slack messages for ${unifiedContactMap.size} known contacts...`)
+      console.log(`[UnifiedMessageSyncService] Fetching Slack messages for ${unifiedContactMap.size} known contacts... Using since: ${syncCheck.lastMessageTimestamp || 'None (initial or full sync)'}`)
       const slackMessages = await slackAdapter.fetchMessages(userId, {
         limit: 200, // Reasonable limit for sync
-        since: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // Last 30 days
+        // Use the last message timestamp from sync state, or fetch broadly if not available (e.g. last 30 days for initial large sync)
+        since: syncCheck.lastMessageTimestamp || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) 
       })
 
       for (const slackMessage of slackMessages) {
         try {
           messagesProcessed++
+          
+          // Update latestMessageTimestampInBatch
+          if (!latestMessageTimestampInBatch || slackMessage.timestamp > latestMessageTimestampInBatch) {
+            latestMessageTimestampInBatch = slackMessage.timestamp;
+          }
           
           // Find the unified contact for this message sender
           const senderSlackId = slackMessage.sender.id
@@ -308,7 +330,21 @@ export class UnifiedMessageSyncService {
 
     } catch (error) {
       errors.push(`Slack sync error: ${error}`)
+      // Ensure sync state is updated even on error, perhaps to not set isCurrentlySyncing to false if it's a major crash
+      // For now, just rethrow, the finally block in syncAllPlatforms will handle setSyncInProgress(false)
       throw error
+    }
+
+    // After processing, update the sync state
+    if (syncCheck.reason === 'No sync state found - initial sync needed' || syncCheck.reason === 'Initial sync not complete') {
+      // Assuming a larger initial fetch might have happened
+      // This needs more robust logic to determine if it was truly the *full* initial sync
+      await syncStateManager.markInitialSyncComplete(userId, 'slack', { 
+        totalMessages: messagesProcessed, // This might be total ever, or just this batch if truly initial.
+        lastMessageTimestamp: latestMessageTimestampInBatch 
+      });
+    } else if (newMessages > 0 || messagesProcessed > 0) { // update if any messages were processed, even if 0 new added to db
+      await syncStateManager.updateLastSync(userId, 'slack', newMessages, latestMessageTimestampInBatch);
     }
 
     return {
@@ -326,33 +362,86 @@ export class UnifiedMessageSyncService {
    * Sync Gmail platform for a user
    */
   private async syncGmailForUser(userId: string): Promise<SyncResult> {
-    console.log(`Syncing Gmail for user ${userId}`)
-    
-    try {
-      // Use the existing Gmail sync service
-      const result = await syncAllUserEmails(userId)
-      
-      if (!result.success) {
-        throw new Error(result.error || 'Gmail sync failed')
-      }
-      
-      // Count results from the Gmail sync
-      const gmailResults = result.results || []
-      const totalMessages = gmailResults.reduce((sum, r) => sum + (r.result?.count || 0), 0)
-      
+    console.log(`[UnifiedMessageSyncService] Syncing Gmail for user ${userId}`)
+
+    const syncCheck = await syncStateManager.shouldDoIncrementalSync(userId, 'gmail');
+    if (!syncCheck.shouldSync) {
+      console.log(`[UnifiedMessageSyncService] Gmail sync skipped for user ${userId}: ${syncCheck.reason}`);
       return {
         platform: 'gmail',
-        contactsProcessed: gmailResults.length,
-        contactsCreated: 0, // Gmail sync works with existing contacts
-        contactsMatched: gmailResults.length,
-        messagesProcessed: totalMessages,
-        newMessages: totalMessages,
+        contactsProcessed: 0,
+        contactsCreated: 0,
+        contactsMatched: 0,
+        messagesProcessed: 0,
+        newMessages: 0,
         errors: []
+      };
+    }
+    console.log(`[UnifiedMessageSyncService] Proceeding with Gmail sync for ${userId}. Reason: ${syncCheck.reason}. Using since: ${syncCheck.lastMessageTimestamp || 'None (initial or full sync)'}`);
+    
+    try {
+      // Use the existing Gmail sync service, passing the lastMessageTimestamp
+      const result = await syncAllUserEmails(userId, syncCheck.lastMessageTimestamp);
+      
+      if (!result.success && (!result.detailedResults || result.detailedResults.length === 0)) {
+        // If overall success is false and there are no detailed results, it might be a token error or similar general failure.
+        throw new Error(result.error || 'Gmail sync failed at service level with no detailed results');
+      }
+
+      // Determine the latest message timestamp from this batch
+      let latestMessageTimestampInBatch: Date | undefined = undefined;
+      if (result.allFetchedGmailMessages && result.allFetchedGmailMessages.length > 0) {
+        for (const gmailMsg of result.allFetchedGmailMessages) {
+          if (gmailMsg.internalDate) {
+            const currentMsgDate = new Date(parseInt(gmailMsg.internalDate, 10));
+            if (!latestMessageTimestampInBatch || currentMsgDate > latestMessageTimestampInBatch) {
+              latestMessageTimestampInBatch = currentMsgDate;
+            }
+          }
+        }
       }
       
-    } catch (error) {
-      console.error('Gmail sync error:', error)
-      throw error
+      const messagesProcessedInThisRun = result.allFetchedGmailMessages?.length || 0;
+      // This `newMessages` count from syncAllUserEmails might represent all messages fetched in this run,
+      // not necessarily messages *new* to the Prisma DB, as `syncAllUserEmails` doesn't check Prisma itself.
+      // The actual number of *newly inserted* messages would be determined by UnifiedMessageService.storeMessage.
+      // For sync state, `messagesProcessedInThisRun` (count of API fetched items) and `latestMessageTimestampInBatch` are key.
+      // We'll rely on `storeMessage` to increment a counter if we want true `newMessagesAddedToDb`.
+      // For now, let's consider messages fetched from API as potentially new for the sake of `updateLastSync`.
+      const pseudoNewMessages = messagesProcessedInThisRun; 
+
+      // Update sync state
+      // Note: `result.detailedResults` gives per-contact counts, `result.allFetchedGmailMessages.length` is total API messages fetched.
+      // The actual number of new messages inserted into *our* DB happens via storeMessage, which is not directly called here.
+      // We need to refine how `newMessages` is determined if it needs to be exact DB inserts.
+      if (syncCheck.reason === 'No sync state found - initial sync needed' || syncCheck.reason === 'Initial sync not complete') {
+        await syncStateManager.markInitialSyncComplete(userId, 'gmail', {
+          totalMessages: messagesProcessedInThisRun, // This is messages *fetched* in this batch
+          lastMessageTimestamp: latestMessageTimestampInBatch
+        });
+      } else if (pseudoNewMessages > 0 || messagesProcessedInThisRun > 0) { 
+        await syncStateManager.updateLastSync(userId, 'gmail', pseudoNewMessages, latestMessageTimestampInBatch);
+      }
+      
+      const errorsFromDetailedResults = result.detailedResults?.filter(dr => !dr.success && dr.error).map(dr => `Contact ${dr.contactId}: ${dr.error}`) || [];
+      if (result.error && !result.success) { // Add general error if present and overall not successful
+        errorsFromDetailedResults.push(result.error);
+      }
+
+      return {
+        platform: 'gmail',
+        contactsProcessed: result.detailedResults?.length || 0,
+        contactsCreated: 0, // Gmail sync works with existing contacts, creation happens elsewhere
+        contactsMatched: result.detailedResults?.filter(dr => dr.success).length || 0,
+        messagesProcessed: messagesProcessedInThisRun,
+        newMessages: pseudoNewMessages, // This is messages fetched in this run
+        errors: errorsFromDetailedResults
+      }
+      
+    } catch (error: any) {
+      console.error('[UnifiedMessageSyncService] Gmail sync error:', error);
+      // Consider how to update sync state on error - e.g., set isCurrentlySyncing to false
+      throw error; // Rethrow to be caught by syncAllPlatforms finally block
     }
   }
 

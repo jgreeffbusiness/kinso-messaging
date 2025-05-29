@@ -9,9 +9,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
-const DEFAULT_TOP_K = 3;
-const DEFAULT_MATCH_THRESHOLD = 0.7;
-const MAX_TOTAL_SNIPPETS = 7; // Max combined snippets to send to LLM
+const DEFAULT_TOP_K = 8;
+const DEFAULT_MATCH_THRESHOLD = 0.6;
+const SECONDARY_MATCH_THRESHOLD = 0.4;
+const MIN_SNIPPETS_FROM_SOURCE_BEFORE_RETRY = 2;
+const MAX_TOTAL_SNIPPETS = 5;
 
 interface SemanticSearchRequestBody {
   query: string;
@@ -65,17 +67,19 @@ export async function POST(request: NextRequest) {
     }
     const decoded = verify(sessionCookie, JWT_SECRET) as { userId: string };
     const userId = decoded.userId;
+    console.log('[SemanticSearchAPI] Authenticated userId:', userId);
     if (!userId) {
       return NextResponse.json({ error: 'User ID not found in session' }, { status: 401 });
     }
 
     const body = (await request.json()) as SemanticSearchRequestBody;
-    const { 
+    let { 
         query,
-        sources = ['ai_chat_history', 'platform_messages'], // Default to all sources
+        sources = ['ai_chat_history', 'platform_messages'],
         topK = DEFAULT_TOP_K,
         matchThreshold = DEFAULT_MATCH_THRESHOLD
     } = body;
+    console.log(`[SemanticSearchAPI] Received query: "${query}", sources: ${sources.join(', ')}, topK: ${topK}, primaryMatchThreshold: ${matchThreshold}`);
 
     if (!query) {
       return NextResponse.json({ error: 'Query parameter is required' }, { status: 400 });
@@ -89,13 +93,16 @@ export async function POST(request: NextRequest) {
 
     const queryEmbedding = await getEmbedding(query, userId);
     if (!queryEmbedding) {
+      console.error('[SemanticSearchAPI] Failed to generate embedding for query:', query);
       return NextResponse.json({ error: 'Failed to generate embedding for the query' }, { status: 500 });
     }
+    console.log('[SemanticSearchAPI] Query embedding generated successfully.');
 
     let allSnippets: SearchResultItem[] = [];
+    const retrievedSnippetIds = new Set<string>();
 
-    // 1. Search AI Chat History
     if (sources.includes('ai_chat_history')) {
+      console.log(`[SemanticSearchAPI] Fetching from match_ai_chat_messages with threshold: ${matchThreshold}`);
       const { data: chatData, error: chatError } = await supabaseAdmin.rpc('match_ai_chat_messages', {
         query_embedding: queryEmbedding,
         user_id_filter: userId,
@@ -104,22 +111,26 @@ export async function POST(request: NextRequest) {
       }) as { data: MatchAiChatMessageResult[] | null; error: any };
 
       if (chatError) {
-        console.error('[SemanticSearchAPI] Error fetching from match_ai_chat_messages:', chatError);
-        // Decide if this should be a hard error or just a warning
-      } else if (chatData) {
-        const formattedChatData: SearchResultItem[] = chatData.map((item: MatchAiChatMessageResult) => ({
+        console.error('[SemanticSearchAPI] Error fetching from match_ai_chat_messages (initial):', chatError);
+      } else if (chatData && chatData.length > 0) {
+        console.log('[SemanticSearchAPI] Raw chatData received (initial):', JSON.stringify(chatData, null, 2));
+        const formattedChatData: SearchResultItem[] = chatData.map(item => ({
           id: item.id,
-          content: item.content, // SQL function returns the full original content
+          content: item.content,
           source: 'ai_chat_history',
           similarity: item.similarity,
           metadata: { role: item.role, created_at: item.created_at }
         }));
-        allSnippets = allSnippets.concat(formattedChatData);
+        formattedChatData.forEach(s => { if (!retrievedSnippetIds.has(s.id)) { allSnippets.push(s); retrievedSnippetIds.add(s.id); } });
+        console.log(`[SemanticSearchAPI] Added ${formattedChatData.length} snippets from AI chat history (initial).`);
+      } else {
+        console.log('[SemanticSearchAPI] No data from match_ai_chat_messages (initial).');
       }
     }
 
-    // 2. Search Platform Messages
     if (sources.includes('platform_messages')) {
+      let platformSnippetsCount = 0;
+      console.log(`[SemanticSearchAPI] Fetching from match_platform_messages with primary threshold: ${matchThreshold}`);
       const { data: platformMsgData, error: platformMsgError } = await supabaseAdmin.rpc('match_platform_messages', {
         query_embedding: queryEmbedding,
         user_id_filter: userId,
@@ -128,39 +139,77 @@ export async function POST(request: NextRequest) {
       }) as { data: MatchPlatformMessageResult[] | null; error: any };
 
       if (platformMsgError) {
-        console.error('[SemanticSearchAPI] Error fetching from match_platform_messages:', platformMsgError);
-      } else if (platformMsgData) {
-        const formattedPlatformData: SearchResultItem[] = platformMsgData.map((item: MatchPlatformMessageResult) => ({
-          id: item.id,
-          content: item.content_chunk, // SQL function returns the matched chunk
-          source: 'platform_messages',
-          similarity: item.similarity,
-          metadata: { 
-            platform: item.platform, 
-            subject: item.original_subject, 
-            timestamp: item.message_timestamp, 
-            full_content_preview: item.original_full_content?.substring(0, 200) + '...' // Optional: preview of full content
-          }
+        console.error('[SemanticSearchAPI] Error fetching from match_platform_messages (initial):', platformMsgError);
+      } else if (platformMsgData && platformMsgData.length > 0) {
+        console.log('[SemanticSearchAPI] Raw platformMsgData received (initial):', JSON.stringify(platformMsgData, null, 2));
+        const formattedPlatformData: SearchResultItem[] = platformMsgData.map(item => ({
+          id: item.id, content: item.content_chunk, source: 'platform_messages', similarity: item.similarity,
+          metadata: { platform: item.platform, subject: item.original_subject, timestamp: item.message_timestamp, full_content_preview: item.original_full_content?.substring(0, 200) + '...' }
         }));
-        allSnippets = allSnippets.concat(formattedPlatformData);
+        formattedPlatformData.forEach(s => { if (!retrievedSnippetIds.has(s.id)) { allSnippets.push(s); retrievedSnippetIds.add(s.id); } });
+        platformSnippetsCount = formattedPlatformData.length;
+        console.log(`[SemanticSearchAPI] Added ${platformSnippetsCount} snippets from platform messages (initial).`);
+      } else {
+        console.log('[SemanticSearchAPI] No data from match_platform_messages (initial).');
+      }
+
+      if (platformSnippetsCount < MIN_SNIPPETS_FROM_SOURCE_BEFORE_RETRY && platformSnippetsCount < topK) {
+        console.log(`[SemanticSearchAPI] Platform messages count (${platformSnippetsCount}) is low. Retrying with secondary threshold: ${SECONDARY_MATCH_THRESHOLD}`);
+        const { data: platformMsgDataRetry, error: platformMsgErrorRetry } = await supabaseAdmin.rpc('match_platform_messages', {
+          query_embedding: queryEmbedding,
+          user_id_filter: userId,
+          match_threshold: SECONDARY_MATCH_THRESHOLD,
+          match_count: topK - platformSnippetsCount,
+        }) as { data: MatchPlatformMessageResult[] | null; error: any };
+
+        if (platformMsgErrorRetry) {
+          console.error('[SemanticSearchAPI] Error fetching from match_platform_messages (retry):', platformMsgErrorRetry);
+        } else if (platformMsgDataRetry && platformMsgDataRetry.length > 0) {
+          console.log('[SemanticSearchAPI] Raw platformMsgData received (retry):', JSON.stringify(platformMsgDataRetry, null, 2));
+          const formattedPlatformDataRetry: SearchResultItem[] = platformMsgDataRetry.map(item => ({
+            id: item.id, content: item.content_chunk, source: 'platform_messages', similarity: item.similarity,
+            metadata: { platform: item.platform, subject: item.original_subject, timestamp: item.message_timestamp, full_content_preview: item.original_full_content?.substring(0, 200) + '...' }
+          }));
+          formattedPlatformDataRetry.forEach(s => { if (!retrievedSnippetIds.has(s.id)) { allSnippets.push(s); retrievedSnippetIds.add(s.id); } });
+          console.log(`[SemanticSearchAPI] Added ${formattedPlatformDataRetry.length} snippets from platform messages (retry).`);
+        } else {
+          console.log('[SemanticSearchAPI] No additional data from match_platform_messages (retry).');
+        }
       }
     }
+    
+    const finalUniqueSnippets: SearchResultItem[] = [];
+    const uniqueIds = new Map<string, SearchResultItem>();
+    for (const snippet of allSnippets) {
+        if (!uniqueIds.has(snippet.id) || (uniqueIds.get(snippet.id)!.similarity || 0) < (snippet.similarity || 0)) {
+            uniqueIds.set(snippet.id, snippet);
+        }
+    }
+    finalUniqueSnippets.push(...uniqueIds.values());
+    allSnippets = finalUniqueSnippets;
 
-    // 3. Sort all collected snippets by similarity and take the top N
-    allSnippets.sort((a, b) => b.similarity - a.similarity);
+    console.log('[SemanticSearchAPI] Total snippets BEFORE sorting/slicing (after potential retry & de-dupe):', allSnippets.length);
+    allSnippets.forEach(snippet => {
+      console.log(`[SemanticSearchAPI] Snippet pre-sort: Source: ${snippet.source}, Similarity: ${snippet.similarity?.toFixed(4) || 'N/A'}, Content: "${snippet.content?.substring(0, 100) || 'N/A'}..."`);
+    });
+
+    allSnippets.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
     const topSnippets = allSnippets.slice(0, MAX_TOTAL_SNIPPETS);
 
+    console.log('[SemanticSearchAPI] MAX_TOTAL_SNIPPETS set to:', MAX_TOTAL_SNIPPETS);
+    console.log('[SemanticSearchAPI] Top snippets count after sort and slice:', topSnippets.length);
+    topSnippets.forEach(snippet => {
+      console.log(`[SemanticSearchAPI] Top Snippet: Source: ${snippet.source}, Similarity: ${snippet.similarity?.toFixed(4) || 'N/A'}, Content: "${snippet.content?.substring(0, 150) || 'N/A'}..."`);
+      console.log('[SemanticSearchAPI] Top Snippet Metadata:', snippet.metadata);
+    });
+
     if (topSnippets.length === 0) {
-      // Option 1: Return a message saying nothing relevant was found
-      // return NextResponse.json({ answer: \"I couldn't find any relevant information in your data to answer that question.\" });
-      // Option 2: Call the LLM without context, or with a specific prompt indicating no context was found.
-      // For now, let's proceed to LLM, which might say it can't answer based on context.
+      console.warn('[SemanticSearchAPI] No relevant snippets found after filtering, thresholding, and sorting!');
     }
 
-    // 4. Construct the prompt for the LLM
     let contextString = topSnippets
       .map(snippet => {
-        let snippetHeader = `Source: ${snippet.source === 'ai_chat_history' ? 'AI Chat History' : 'Platform Message'} (Similarity: ${snippet.similarity.toFixed(2)})`;
+        let snippetHeader = `Source: ${snippet.source === 'ai_chat_history' ? 'AI Chat History' : 'Platform Message'} (Similarity: ${snippet.similarity?.toFixed(2) || 'N/A'})`;
         if (snippet.source === 'ai_chat_history' && snippet.metadata?.role) {
           snippetHeader += ` | Role: ${snippet.metadata.role}`;
         }
@@ -175,19 +224,22 @@ export async function POST(request: NextRequest) {
     if (topSnippets.length === 0) {
         contextString = "No specific relevant excerpts found in your data.";
     }
+    console.log('[SemanticSearchAPI] Context string for LLM:', contextString);
 
-    const systemPrompt = `You are a helpful AI assistant. Based ONLY on the following relevant excerpts from the user\'s data, answer their current question. 
+    const systemPromptForAnswer = `You are a helpful AI assistant. Based ONLY on the following relevant excerpts from the user\'s data, answer their current question. 
 If the answer is not found in the provided excerpts, clearly state that you couldn\'t find the information in the provided context or that the context is insufficient. 
 Do not make up information. Be concise. Reference the source of information if it seems relevant (e.g., \"In a previous chat...\", \"In an email with subject X...\").
 
 Relevant excerpts:
 ${contextString}`;
+    console.log('[SemanticSearchAPI] System prompt for final LLM:', systemPromptForAnswer);
+    console.log('[SemanticSearchAPI] User query for final LLM:', query);
 
     // 5. Call OpenAI LLM
     const llmResponse = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo', // Or your preferred model, e.g., gpt-4
       messages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: systemPromptForAnswer },
         { role: 'user', content: query },
       ],
       temperature: 0.3, // Lower temperature for more factual, less creative answers

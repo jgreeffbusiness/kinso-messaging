@@ -11,29 +11,42 @@ interface AiConversationContextData {
   [key: string]: unknown; // Changed from any to unknown for better type safety
 }
 
-// Matches the structure returned by GET /api/ai/chat-messages
-// And also the structure used internally by the ChatProvider
+// Define the structure for items in the retrieved_sources array
+export type RetrievedSourceItem = {
+  id: string;          // Original Message ID or entity ID
+  source_type: string; // e.g., 'platform_messages', 'contact', 'note'
+  platform?: string;    // e.g., 'email', 'slack'
+  subject?: string;     // e.g., email subject
+  timestamp?: string;   // ISO date string
+  preview: string;     // The content chunk or a summary preview
+  name?: string;        // For contacts: full name
+  // Add other common fields or make a union type if structures vary wildly
+};
+
+// Update Message type to include retrieved_sources
 export type Message = {
-  id: string; // Changed from number to string to match Prisma cuid/uuid
+  id: string; 
   content: string;
-  role: 'user' | 'assistant'; // Changed sender to role for consistency with API/LLM
+  role: 'user' | 'assistant'; 
   createdAt: string;
+  retrieved_sources?: RetrievedSourceItem[]; // Optional array of source items
+  // Potentially add other fields from AiAssistantApiResponse like 'details' if needed for UI
+  // For example: details?: AiAssistantContext | Record<string, unknown>;
 };
 
 export type ChatContextType = {
   inputValue: string
   setInputValue: Dispatch<SetStateAction<string>>
   messages: Message[]
-  // addMessage will now primarily update local state. Saving to backend will be responsibility of caller (RightPanel)
-  addMessage: (message: Omit<Message, 'id' | 'createdAt'> & { tempId?: string, createdAt?: string }) => string; // Returns a temporary ID
-  updateMessageId: (temporaryId: string, newId: string) => void; // For updating ID after backend save
+  // Update addMessage to accept the full Message type (excluding id, createdAt, but including new optional fields)
+  addMessage: (message: Omit<Message, 'id' | 'createdAt'> & { tempId?: string, createdAt?: string }) => string; 
+  updateMessageId: (temporaryId: string, newId: string) => void; 
   aiIsResponding: boolean
   setAiIsResponding: Dispatch<SetStateAction<boolean>>
   aiConversationContext: AiConversationContextData | null
   setAiConversationContext: Dispatch<SetStateAction<AiConversationContextData | null>>
   clearChat: () => void
   isLoadingHistory: boolean
-  // No open/close methods needed
 }
 
 const CHAT_HISTORY_LOCAL_STORAGE_KEY = 'kinso-ai-chat-history'
@@ -45,6 +58,7 @@ const initialAssistantMessage = (): Message => ({
   content: "How can I help you today?",
   role: "assistant",
   createdAt: new Date().toISOString()
+  // No retrieved_sources for initial message
 })
 
 export function ChatProvider({ children }: { children: ReactNode }) {
@@ -108,14 +122,17 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   }, [messages, isLoadingHistory])
 
   const addMessage = useCallback((messageInput: Omit<Message, 'id' | 'createdAt'> & { tempId?: string, createdAt?: string }): string => {
-    const { role, content, tempId, createdAt } = messageInput;
+    // Destructure all potential fields from messageInput, including the new ones
+    const { role, content, retrieved_sources, tempId, createdAt } = messageInput;
     const temporaryId = tempId || `temp-${Date.now()}-${Math.random()}`;
     
     const newMessage: Message = {
       id: temporaryId,
       role,
       content,
-      createdAt: createdAt || new Date().toISOString()
+      createdAt: createdAt || new Date().toISOString(),
+      // Add retrieved_sources if it exists in messageInput
+      ...(retrieved_sources && { retrieved_sources }),
     };
     console.log("[ChatProvider] Adding message:", JSON.stringify(newMessage));
     setMessages(prev => [...prev, newMessage]);

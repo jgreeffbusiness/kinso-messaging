@@ -2,27 +2,15 @@
 
 import { Input } from '@components/ui/input'
 import { Button } from '@components/ui/button'
-import { Badge } from '@components/ui/badge'
 import { cn } from '@lib/utils'
 import { useChat } from '@/providers/ChatProvider'
-import { useActiveFocus } from '@/providers/ActiveFocusProvider'
-import { useAIContext } from '@hooks/useAIContext'
-import useMessages from '@hooks/useMessages'
-import { Message as ThreadMessageItem } from '@hooks/useThreadedMessages'
 import { 
   Brain, 
-  Calendar, 
-  Clock, 
-  MessageSquare, 
-  StickyNote, 
-  CheckSquare,
   Sparkles,
-  Eye,
-  CheckCircle,
-  AlertTriangle,
-  Loader2
+  Loader2,
+  Mail,
+  Paperclip
 } from 'lucide-react'
-import { SuggestedAction, ThreadAnalysis } from '@/lib/thread-processor'
 import { toast } from 'sonner'
 
 // Interface for response from /api/ai/command-handler
@@ -43,11 +31,24 @@ interface AiAssistantContext {
   [key: string]: unknown; // Changed from any to unknown
 }
 
+// Add the RetrievedSourceItem type here or import it if it's in a shared types file
+// For now, defining it here based on assistant-handler's output structure
+interface RetrievedSourceItem { 
+  id: string; 
+  source_type: string; 
+  platform?: string; 
+  subject?: string; 
+  timestamp?: string; 
+  preview: string; 
+}
+
+// Update AiAssistantApiResponse to include the new field we expect from the backend
 interface AiAssistantApiResponse {
-  message: string; // This is the reply_to_user
-  details?: AiAssistantContext | Record<string, unknown>; // This can hold the intent_context for next turn or fulfillment data
-  followUpQuestion?: string; // If present, indicates API is asking for more info
+  message: string; 
+  details?: AiAssistantContext | Record<string, unknown>; 
+  followUpQuestion?: string; 
   actionToFulfill?: { type: string; data: Record<string, unknown>; };
+  retrieved_sources?: RetrievedSourceItem[]; // Added this field
   error?: string;
 }
 
@@ -64,82 +65,6 @@ export function RightPanel() {
     setAiConversationContext,
     isLoadingHistory
   } = useChat()
-
-  const { activeItem } = useActiveFocus()
-  const { messages: allMessagesFromHook } = useMessages()
-  
-  const { context: aiContext, loading: aiLoading, error: aiError } = useAIContext({
-    activeItem: activeItem,
-    allMessages: (allMessagesFromHook || []) as ThreadMessageItem[]
-  })
-
-  const handleAIAction = (action: SuggestedAction) => {
-    let assistantMessage = "";
-    let newInputValue = "";
-
-    switch (action.type) {
-      case 'reply':
-        let contactNameToReply = "the contact";
-        if (aiContext?.keyInsights && aiContext.keyInsights.length > 0) {
-            // This is a placeholder - ideally aiContext would have a dedicated contactName field
-            // or we parse it from action.title or aiContext.summary
-        }
-        if (activeItem && (activeItem.type === 'message' || activeItem.type === 'dashboard_item')) {
-            contactNameToReply = activeItem.data.contact?.fullName || activeItem.data.displayName || contactNameToReply;
-        }
-        
-        const actionTitle = action.title || "this topic";
-        const actionDescription = action.description || "the points raised";
-        const lastUserMsg = aiContext?.lastUserMessage ? `My last message was: "${aiContext.lastUserMessage.substring(0,100)}..."` : "";
-        const unreadContext = aiContext?.unreadHighlights && aiContext.unreadHighlights.length > 0 ? `Their latest updates included: "${aiContext.unreadHighlights.join('; ').substring(0,150)}..."` : "";
-
-        newInputValue = `Draft a reply to ${contactNameToReply} about "${actionTitle}". Focus on: ${actionDescription}. ${lastUserMsg} ${unreadContext} Key point I want to make: `;
-        assistantMessage = `Okay, I've started a draft prompt for your reply regarding "${actionTitle}". Please review or add your key points below and send.`;
-        setInputValue(newInputValue);
-        break;
-      case 'calendar': toast.info('Calendar integration coming soon!'); return;
-      case 'reminder': toast.info('Reminder feature coming soon!'); return;
-      case 'note': assistantMessage = `Note added: ${action.description}`; break;
-      case 'task': assistantMessage = `Task created: ${action.title}`; break;
-      case 'monitor': assistantMessage = `I'll monitor this thread. You'll be notified if directly addressed.`; break;
-      case 'no-action': assistantMessage = `No action needed right now. ${action.description}`; break;
-      case 'generic': 
-      default:
-        assistantMessage = `${action.title} - I'll help with this!`;
-        break;
-    }
-
-    if (assistantMessage) {
-        addMessage({
-            content: assistantMessage,
-            sender: 'assistant',
-            createdAt: new Date().toISOString()
-        });
-    }
-  }
-
-  const getActionIcon = (type: SuggestedAction['type']) => {
-    switch (type) {
-      case 'calendar': return <Calendar className="h-4 w-4" />
-      case 'reminder': return <Clock className="h-4 w-4" />
-      case 'reply': return <MessageSquare className="h-4 w-4" />
-      case 'note': return <StickyNote className="h-4 w-4" />
-      case 'task': return <CheckSquare className="h-4 w-4" />
-      case 'monitor': return <Eye className="h-4 w-4" />
-      case 'no-action': return <CheckCircle className="h-4 w-4" />
-      default: return <Sparkles className="h-4 w-4" />
-    }
-  }
-
-  const getUrgencyColor = (urgency?: ThreadAnalysis['urgency']) => {
-    if (!urgency) return 'bg-gray-100 text-gray-800';
-    switch (urgency.toLowerCase()) {
-      case 'urgent': return 'bg-red-100 text-red-800';
-      case 'high': return 'bg-orange-100 text-orange-800';
-      case 'medium': return 'bg-yellow-100 text-yellow-800';
-      default: return 'bg-green-100 text-green-800';
-    }
-  }
 
   const persistMessage = async (role: 'user' | 'assistant', content: string, tempIdToUpdate?: string) => {
     try {
@@ -170,6 +95,7 @@ export function RightPanel() {
     e.preventDefault();
     const currentInput = inputValue.trim();
     if (!currentInput) return;
+    const userId = "cmb5meg9d003iy5edwbbn7yd4"; // Example, ensure this is correctly obtained if needed by persistMessage or history
 
     const userTempId = addMessage({ content: currentInput, role: 'user' });
     const currentConversationHistory = [...chatMessages, 
@@ -183,9 +109,7 @@ export function RightPanel() {
     setAiConversationContext(null); 
     setAiIsResponding(true);
 
-    let assistantResponseText = "I'm sorry, I encountered an issue processing that.";
-    let actionToFulfillOnClient: AiAssistantApiResponse['actionToFulfill'] = undefined;
-    let nextIntentContext: AiAssistantContext | null = null;
+    let apiResponseData: AiAssistantApiResponse | null = null;
 
     try {
       const response = await fetch('/api/ai/assistant-handler', {
@@ -197,41 +121,47 @@ export function RightPanel() {
           currentIntentContext: contextToSend
         }),
       });
-      const data: AiAssistantApiResponse = await response.json();
+      apiResponseData = await response.json() as AiAssistantApiResponse;
       
-      if (!response.ok || data.error) {
-        throw new Error(data.error || 'AI assistant request failed');
+      console.log('[RightPanel handleChatSubmit] Full apiResponseData from backend:', JSON.stringify(apiResponseData, null, 2));
+
+      if (!response.ok || apiResponseData.error) {
+        throw new Error(apiResponseData.error || 'AI assistant request failed');
       }
-      assistantResponseText = data.message;
-      actionToFulfillOnClient = data.actionToFulfill;
-      if (data.followUpQuestion && data.details) {
-        nextIntentContext = data.details as AiAssistantContext;
-        console.log("[RightPanel] API expects follow-up. New intent_context for next turn:", nextIntentContext);
+    } catch (error: unknown) {
+      console.error("AI Assistant API error:", error);
+      const errorMessage = error instanceof Error ? error.message : "An unexpected error occurred with the AI.";
+      apiResponseData = { message: errorMessage, error: errorMessage };
+    }
+
+    if (apiResponseData) {
+      console.log('[RightPanel handleChatSubmit] Data being passed to addMessage - content:', apiResponseData.message);
+      console.log('[RightPanel handleChatSubmit] Data being passed to addMessage - retrieved_sources:', JSON.stringify(apiResponseData.retrieved_sources, null, 2));
+
+      addMessage({
+        content: apiResponseData.message, 
+        role: 'assistant',
+        retrieved_sources: apiResponseData.retrieved_sources,
+      });
+      persistMessage('assistant', apiResponseData.message, undefined);
+      
+      if (apiResponseData.followUpQuestion && apiResponseData.details) {
+        setAiConversationContext(apiResponseData.details as AiAssistantContext);
       } else {
         console.log("[RightPanel] API does not expect follow-up. Context will be cleared/remain null.");
       }
 
-    } catch (error: unknown) {
-      console.error("AI Assistant API error:", error);
-      assistantResponseText = error instanceof Error ? error.message : "An unexpected error occurred with the AI.";
-      nextIntentContext = null;
-    }
-
-    const assistantTempId = addMessage({ content: assistantResponseText, role: 'assistant' });
-    persistMessage('assistant', assistantResponseText, assistantTempId);
-    
-    setAiConversationContext(nextIntentContext);
-    
-    if (actionToFulfillOnClient?.type === 'DRAFT_EMAIL') {
-      const recipient = actionToFulfillOnClient.data.recipient as string || '';
-      const subject = actionToFulfillOnClient.data.subject as string || '';
-      const bodyHint = actionToFulfillOnClient.data.bodyHint as string || '';
-      const mailto = `mailto:${recipient}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyHint + '\n\n(Drafted by AI Assistant)')}`;
-      toast.info("Your email draft is ready.", {
-        description: `To: ${recipient}`,
-        action: { label: "Open Email Client", onClick: () => window.open(mailto, '_blank') }
-      });
-    }
+      if (apiResponseData.actionToFulfill?.type === 'DRAFT_EMAIL') {
+        const recipient = apiResponseData.actionToFulfill.data.recipient as string || '';
+        const subject = apiResponseData.actionToFulfill.data.subject as string || '';
+        const bodyHint = apiResponseData.actionToFulfill.data.bodyHint as string || '';
+        const mailto = `mailto:${recipient}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyHint + '\n\n(Drafted by AI Assistant)')}`;
+        toast.info("Your email draft is ready.", {
+          description: `To: ${recipient}`,
+          action: { label: "Open Email Client", onClick: () => window.open(mailto, '_blank') }
+        });
+      }
+    } 
     setAiIsResponding(false);
   };
 
@@ -244,7 +174,7 @@ export function RightPanel() {
         </h3>
       </div>
       
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="flex-1 overflow-y-auto p-4 space-y-1 flex flex-col">
         {isLoadingHistory ? (
           <div className="flex justify-center items-center h-full">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -252,18 +182,93 @@ export function RightPanel() {
           </div>
         ) : (
           chatMessages.map(message => {
-            // console.log("Rendering message:", message); // DEBUG: Check message object structure and role
+            // Logic to determine primary source and other sources
+            let primarySource: RetrievedSourceItem | null = null;
+            let otherSources: RetrievedSourceItem[] = [];
+            let identifiedSubjectFromAi: string | null = null;
+
+            if (message.role === 'assistant' && message.retrieved_sources && message.retrieved_sources.length > 0) {
+              const subjectHintMatch = message.content.match(/email (?:titled|subject) ['"](.+?)['"]/i);
+              identifiedSubjectFromAi = subjectHintMatch ? subjectHintMatch[1] : null;
+
+              if (identifiedSubjectFromAi) {
+                primarySource = message.retrieved_sources.find(
+                  src => src.subject && src.subject.toLowerCase().includes(identifiedSubjectFromAi!.toLowerCase())
+                ) || message.retrieved_sources[0] || null; // Fallback to first if specific subject not found
+              } else {
+                primarySource = message.retrieved_sources[0] || null; // Default to the first source if no subject hint
+              }
+
+              if (primarySource) {
+                otherSources = message.retrieved_sources.filter(src => src.id !== primarySource!.id);
+              } else {
+                otherSources = [...message.retrieved_sources]; // Should not happen if primarySource logic is sound
+              }
+            }
             return (
               <div 
                 key={message.id} 
                 className={cn(
-                  "p-3 rounded-lg break-words text-sm shadow-sm max-w-[85%]", // Common styles
+                  "p-3 rounded-lg break-words text-sm shadow-sm max-w-[90%] mb-3",
                   message.role === "assistant" 
-                    ? "bg-muted self-start text-foreground" // Ensure assistant has contrasting text
-                    : "bg-primary text-primary-foreground self-end" // User styles
+                    ? "bg-slate-100 text-slate-800 self-start"
+                    : "bg-sky-100 text-sky-800 self-end"
                 )}
               >
-                <p>{message.content}</p>
+                <p className="whitespace-pre-wrap">{message.content}</p>
+                
+                {primarySource && (
+                  <div className="mt-3 pt-3 border-t border-slate-300 space-y-2">
+                    <h4 className="text-xs font-bold text-slate-700">Referenced Source:</h4>
+                    <div key={`${message.id}-primarysource`} className="p-2 border border-slate-300 rounded-md bg-white shadow-md">
+                      <div className="flex items-center gap-2 mb-1">
+                        {primarySource.platform === 'email' && <Mail className="h-4 w-4 text-slate-500 flex-shrink-0" />}
+                        {(!primarySource.platform || primarySource.platform !== 'email') && <Paperclip className="h-4 w-4 text-slate-500 flex-shrink-0" />}
+                        <span className="text-xs font-medium text-slate-700 truncate" title={primarySource.subject || 'Source'}>
+                          {primarySource.subject || `Source (${primarySource.platform || primarySource.source_type})`}
+                        </span>
+                      </div>
+                      {primarySource.timestamp && (
+                        <p className="text-xs text-slate-500 mb-1">
+                          {new Date(primarySource.timestamp).toLocaleDateString()} {new Date(primarySource.timestamp).toLocaleTimeString()}
+                        </p>
+                      )}
+                      <p className="text-xs text-slate-600 line-clamp-3 mb-1" title={primarySource.preview}>
+                        {primarySource.preview}
+                      </p>
+                      <Button 
+                        variant="link" size="sm" className="p-0 h-auto text-xs text-blue-600 hover:text-blue-800"
+                        onClick={() => { toast.info(`TODO: Show details for ${primarySource.subject || primarySource.id}`); console.log("View Details for primary source:", primarySource); }}
+                      >
+                        View Details
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {otherSources.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-slate-200 space-y-2">
+                    <h4 className="text-xs font-semibold text-slate-600">Other Potentially Relevant Items:</h4>
+                    {otherSources.map((source, index) => (
+                      <div key={`${message.id}-othersource-${index}`} className="p-2 border border-slate-200 rounded-md bg-white hover:shadow-sm transition-shadow">
+                        <div className="flex items-center gap-2 mb-1">
+                           {source.platform === 'email' && <Mail className="h-4 w-4 text-slate-500 flex-shrink-0" />}
+                           {(!source.platform || source.platform !== 'email') && <Paperclip className="h-4 w-4 text-slate-500 flex-shrink-0" />}
+                           <span className="text-xs font-medium text-slate-700 truncate" title={source.subject || 'Source'}>
+                             {source.subject || `Source (${source.platform || source.source_type})`}
+                           </span>
+                         </div>
+                        {source.timestamp && <p className="text-xs text-slate-500 mb-1">{new Date(source.timestamp).toLocaleDateString()}</p>}
+                        <p className="text-xs text-slate-600 line-clamp-2 mb-1" title={source.preview}>{source.preview}</p>
+                        <Button 
+                          variant="link" size="sm" className="p-0 h-auto text-xs text-blue-600 hover:text-blue-800"
+                          onClick={() => { toast.info(`TODO: Show details for ${source.subject || source.id}`); console.log("View Details for other source:", source); }}
+                        >
+                          View Details
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })

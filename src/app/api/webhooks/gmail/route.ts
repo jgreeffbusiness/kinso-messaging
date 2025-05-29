@@ -68,17 +68,18 @@ export async function POST(request: NextRequest) {
     console.log(`📧 New email activity detected for user ${user.email} (${user.id})`)
     console.log(`   History ID: ${decodedData.historyId}`)
 
-    // Process incremental sync using the history ID
+    // Process incremental sync using the history ID from the webhook
+    // processHistoryUpdate will now fetch the *previous* stored historyId itself.
     const historyResult = await gmailWebhookSetup.processHistoryUpdate(
       user.id, 
-      decodedData.historyId
+      decodedData.historyId // This is the new historyId from the current webhook notification
     )
 
-    if (historyResult.success && historyResult.newMessages > 0) {
-      console.log(`📨 Processed ${historyResult.newMessages} new emails`)
+    if (historyResult.success && historyResult.newMessagesProcessed > 0) {
+      console.log(`📨 Processed ${historyResult.newMessagesProcessed} new emails`)
       
       // Notify threading service of new messages
-      await optimizedThreadingService.onNewMessages(user.id, historyResult.newMessages)
+      await optimizedThreadingService.onNewMessages(user.id, historyResult.newMessagesProcessed)
     } else if (!historyResult.success) {
       console.log(`❌ History processing failed: ${historyResult.error}`)
     }
@@ -87,7 +88,7 @@ export async function POST(request: NextRequest) {
       status: 'processed',
       userId: user.id,
       historyId: decodedData.historyId,
-      newMessages: historyResult.newMessages,
+      newMessagesProcessed: historyResult.newMessagesProcessed,
       processingSuccess: historyResult.success
     })
 

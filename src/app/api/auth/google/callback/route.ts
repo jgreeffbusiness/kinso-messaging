@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/server/db'
+import { gmailWebhookSetup } from '@/lib/services/gmail-webhook-setup'
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
@@ -87,12 +88,35 @@ export async function GET(request: NextRequest) {
             'https://www.googleapis.com/auth/userinfo.email',
             'https://www.googleapis.com/auth/contacts.readonly'
           ],
-          connectedAt: new Date().toISOString()
+          connectedAt: new Date().toISOString(),
+          gmailWatch: {
+            watchActive: false,
+            historyId: null,
+            expiration: null,
+            lastError: null,
+            lastSetupAttempt: null,
+            lastWebhook: null
+          }
         }
       }
     })
 
     console.log(`Google OAuth successful for user ${userId}`)
+
+    // ---- Start Initial Gmail Watch Setup ----
+    try {
+      console.log(`[GoogleCallback] Attempting initial Gmail watch setup for user ${userId}`);
+      const watchResult = await gmailWebhookSetup.setupGmailWatch(userId);
+      if (watchResult.success) {
+        console.log(`[GoogleCallback] Initial Gmail watch successful for user ${userId}, History ID: ${watchResult.historyId}`);
+      } else {
+        console.error(`[GoogleCallback] Initial Gmail watch failed for user ${userId}: ${watchResult.error}`);
+      }
+    } catch (setupError: unknown) {
+      const e = setupError as Error;
+      console.error(`[GoogleCallback] Exception during initial Gmail watch setup for user ${userId}: ${e.message}`, e.stack);
+    }
+    // ---- End Initial Gmail Watch Setup ----
 
     // Redirect back to onboarding with success
     return NextResponse.redirect(

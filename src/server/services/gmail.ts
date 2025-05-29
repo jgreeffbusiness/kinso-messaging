@@ -23,9 +23,9 @@ const createOAuth2ClientWithAutoRefresh = (user: User): GoogleAuth.OAuth2Client 
   // Add token refresh handler
   oauth2Client.on('tokens', async (tokens) => {
     const updateData: Prisma.UserUpdateInput = {
-      googleAccessToken: tokens.access_token,
-      googleTokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined
-    }
+          googleAccessToken: tokens.access_token,
+          googleTokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined
+        }
     if (tokens.refresh_token) {
       updateData.googleRefreshToken = tokens.refresh_token
     }
@@ -82,7 +82,7 @@ export async function manuallyRefreshGoogleToken(user: User): Promise<User> {
 }
 
 // Helper type for raw Gmail message data from API
-interface GmailApiMessageData { 
+export interface GmailApiMessageData { 
   id: string | null | undefined;
   threadId: string | null | undefined;
   internalDate?: string | null | undefined;
@@ -92,7 +92,7 @@ interface GmailApiMessageData {
   // Add other fields you might use from messageDetails.data
 }
 
-export async function syncContactEmails(user: User, contactId: string, initialOAuth2Client: GoogleAuth.OAuth2Client): Promise<{
+export async function syncContactEmails(user: User, contactId: string, initialOAuth2Client: GoogleAuth.OAuth2Client, since?: Date): Promise<{
   success: boolean;
   fetchedGmailMessages: GmailApiMessageData[];
   error?: string;
@@ -109,8 +109,9 @@ export async function syncContactEmails(user: User, contactId: string, initialOA
     return { success: false, fetchedGmailMessages: [], error: "Contact or email missing for syncContactEmails", processedCountAtApiLevel: 0 };
   }
   const contactEmailForSearch = contact.email.trim();
-  console.log(`[syncContactEmails] Syncing for contact ${contactEmailForSearch} (ID: ${contactId}) for user ${user.id}`);
-  const searchQuery = `from:${contactEmailForSearch} OR to:${contactEmailForSearch}`;
+  const sinceQuery = since ? ` after:${since.toISOString().split('T')[0].replace(/-/g,'/')}` : '';
+  console.log(`[syncContactEmails] Syncing for contact ${contactEmailForSearch} (ID: ${contactId}) for user ${user.id}${sinceQuery ? ' since ' + sinceQuery.trim().split(':')[1] : ''}`);
+  const searchQuery = `(from:${contactEmailForSearch} OR to:${contactEmailForSearch})${sinceQuery}`;
   
   try {
     const listResponse = await gmail.users.messages.list({ userId: 'me', q: searchQuery, maxResults: 50 });
@@ -169,14 +170,14 @@ export async function syncContactEmails(user: User, contactId: string, initialOA
   }
 }
 
-export async function syncAllUserEmails(userId: string): Promise<{
+export async function syncAllUserEmails(userId: string, since?: Date): Promise<{
   success: boolean;
   allFetchedGmailMessages: GmailApiMessageData[];
   error?: string;
   detailedResults?: Array<{contactId: string, success: boolean, count: number, error?: string}>;
 }> {
   let user = await prisma.user.findUnique({ 
-    where: { id: userId },
+      where: { id: userId },
     // Select all fields needed by getOAuth2Client and manuallyRefreshGoogleToken
     select: { 
         id: true, email: true, googleAccessToken: true, googleRefreshToken: true, googleTokenExpiry: true,
@@ -228,10 +229,11 @@ export async function syncAllUserEmails(userId: string): Promise<{
   const aggregatedMessages: GmailApiMessageData[] = [];
   const detailedSyncResults = [];
   let overallSuccess = true;
-  
-  for (const contact of user.contacts) {
-    if (contact.email) {
-      const result = await syncContactEmails(user, contact.id, oauth2Client);
+    
+    for (const contact of user.contacts) {
+      if (contact.email) {
+      // Pass the 'since' date to syncContactEmails
+      const result = await syncContactEmails(user, contact.id, oauth2Client, since);
       detailedSyncResults.push({ 
           contactId: contact.id, 
           success: result.success, 
