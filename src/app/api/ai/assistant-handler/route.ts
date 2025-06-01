@@ -115,12 +115,11 @@ interface SearchResultItem {
 }
 
 const MAX_SNIPPETS_FOR_FINAL_ANSWER = 5; // Consistent with semantic-search adjustment
-const MIN_DESIRED_PRIMARY_SNIPPETS = 2; // Try to get at least this many platform snippets if possible
-const MAX_CHAT_HISTORY_FALLBACK_SNIPPETS = 2; // Max chat history snippets to add if primary is lacking
 
 // Constants for controlling snippet selection
-const MAX_PLATFORM_SNIPPETS_TO_CONSIDER = 4; // How many top platform snippets to initially pull
-const MAX_CHAT_HISTORY_SNIPPETS_TO_CONSIDER = 3; // How many top chat history snippets to initially pull
+// const MAX_PLATFORM_SNIPPETS_TO_CONSIDER = 4; // No longer directly used in this new logic
+// const MAX_CHAT_HISTORY_SNIPPETS_TO_CONSIDER = 3; // No longer directly used
+// MAX_SNIPPETS_FOR_FINAL_ANSWER is still 5 (defined earlier or imported)
 
 export async function POST(request: NextRequest) {
   if (!openai) {
@@ -298,8 +297,6 @@ export async function POST(request: NextRequest) {
 
       const platformSnippetsFound: SearchResultItem[] = [];
       const platformSnippetIds = new Set<string>();
-      const aiChatSnippetsFound: SearchResultItem[] = [];
-      const aiChatSnippetIds = new Set<string>();
       const searchApiUrlBase = new URL('/api/ai/semantic-search', request.url).origin;
 
       // --- 1. Fetch Platform Messages for all expanded queries ---
@@ -308,7 +305,7 @@ export async function POST(request: NextRequest) {
         console.log(`[AI Assistant] Semantic search (platform_messages) for query: "${currentQuery}"`);
         try {
           const searchServiceResponse = await fetch(`${searchApiUrlBase}/api/ai/semantic-search`, {
-              method: 'POST',
+            method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Cookie': request.headers.get('cookie') || '' },
             body: JSON.stringify({ query: currentQuery, sources: ['platform_messages'] })
           });
@@ -322,49 +319,37 @@ export async function POST(request: NextRequest) {
       platformSnippetsFound.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
       console.log(`[AI Assistant] Found ${platformSnippetsFound.length} unique platform_messages snippets.`);
 
-      // --- 2. Fetch AI Chat History for a subset of queries (if needed or as supplement) ---
-      console.log("[AI Assistant] Phase 2: Fetching AI Chat History.");
-      const chatHistoryQueriesToTry = searchQueries.slice(0, 1); // For now, just use the primary search query for chat history to reduce noise
-      for (const currentQuery of chatHistoryQueriesToTry) {
-        console.log(`[AI Assistant] Semantic search (ai_chat_history) for query: "${currentQuery}"`);
-        try {
-          const searchServiceResponse = await fetch(`${searchApiUrlBase}/api/ai/semantic-search`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Cookie': request.headers.get('cookie') || '' },
-            body: JSON.stringify({ query: currentQuery, sources: ['ai_chat_history'] })
-          });
-          if (searchServiceResponse.ok) {
-            const searchResult = await searchServiceResponse.json();
-            const snippets = searchResult.debug_retrieved_snippets as SearchResultItem[] || [];
-            snippets.forEach(s => { if (s && s.id && !aiChatSnippetIds.has(s.id)) { aiChatSnippetsFound.push(s); aiChatSnippetIds.add(s.id); } });
-          } else { console.error(`[AI Assistant] Semantic search (ai_chat_history) failed for "${currentQuery}" with status: ${searchServiceResponse.status}`); }
-        } catch (e) { console.error(`[AI Assistant] Error fetching ai_chat_history for "${currentQuery}":`, e); }
-      }
-      aiChatSnippetsFound.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
-      console.log(`[AI Assistant] Found ${aiChatSnippetsFound.length} unique ai_chat_history snippets.`);
+      let finalSelectedSnippetsForContext: SearchResultItem[] = [];
 
-      // --- 3. Combine and Select Final Snippets for Context (New Prioritization Logic) ---
-      let combinedSnippets: SearchResultItem[] = [];
-      // Add top platform messages
-      combinedSnippets.push(...platformSnippetsFound.slice(0, MAX_PLATFORM_SNIPPETS_TO_CONSIDER));
-      // Add top AI chat history messages
-      combinedSnippets.push(...aiChatSnippetsFound.slice(0, MAX_CHAT_HISTORY_SNIPPETS_TO_CONSIDER));
-      
-      // De-duplicate again in case a snippet ID somehow appeared in both (unlikely with current separated fetches)
-      const finalUniqueSnippetsMap = new Map<string, SearchResultItem>();
-      for (const snippet of combinedSnippets) {
-          if (!finalUniqueSnippetsMap.has(snippet.id) || (finalUniqueSnippetsMap.get(snippet.id)!.similarity || 0) < (snippet.similarity || 0)) {
-              finalUniqueSnippetsMap.set(snippet.id, snippet);
-          }
+      if (platformSnippetsFound.length > 0) {
+        console.log("[AI Assistant] Prioritizing platform messages for context.");
+        finalSelectedSnippetsForContext = platformSnippetsFound.slice(0, MAX_SNIPPETS_FOR_FINAL_ANSWER);
+      } else {
+        // --- 2. Fallback to AI Chat History if NO platform messages found ---
+        console.log("[AI Assistant] No platform messages found. Phase 2: Fetching AI Chat History.");
+        const aiChatSnippetsFound: SearchResultItem[] = [];
+        const aiChatSnippetIds = new Set<string>();
+        const chatHistoryQueriesToTry = searchQueries.slice(0, 1); // Use fewer queries for chat history
+        for (const currentQuery of chatHistoryQueriesToTry) {
+          console.log(`[AI Assistant] Semantic search (ai_chat_history) for query: "${currentQuery}"`);
+          try {
+            const searchServiceResponse = await fetch(`${searchApiUrlBase}/api/ai/semantic-search`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Cookie': request.headers.get('cookie') || '' },
+              body: JSON.stringify({ query: currentQuery, sources: ['ai_chat_history'] })
+            });
+            if (searchServiceResponse.ok) {
+              const searchResult = await searchServiceResponse.json();
+              const snippets = searchResult.debug_retrieved_snippets as SearchResultItem[] || [];
+              snippets.forEach(s => { if (s && s.id && !aiChatSnippetIds.has(s.id)) { aiChatSnippetsFound.push(s); aiChatSnippetIds.add(s.id); } });
+            }
+          } catch (e) { console.error(`[AI Assistant] Error fetching ai_chat_history for "${currentQuery}":`, e); }
+        }
+        aiChatSnippetsFound.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
+        console.log(`[AI Assistant] Found ${aiChatSnippetsFound.length} unique ai_chat_history snippets.`);
+        finalSelectedSnippetsForContext = aiChatSnippetsFound.slice(0, MAX_SNIPPETS_FOR_FINAL_ANSWER);
       }
-      let finalSelectedSnippetsForContext = Array.from(finalUniqueSnippetsMap.values());
       
-      // Sort the combined pool by similarity and take the top N
-      finalSelectedSnippetsForContext.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
-      if (finalSelectedSnippetsForContext.length > MAX_SNIPPETS_FOR_FINAL_ANSWER) {
-        finalSelectedSnippetsForContext = finalSelectedSnippetsForContext.slice(0, MAX_SNIPPETS_FOR_FINAL_ANSWER);
-      }
-
       console.log(`[AI Assistant] Top ${finalSelectedSnippetsForContext.length} snippets selected for final answer synthesis:`, JSON.stringify(finalSelectedSnippetsForContext, null, 2));
 
       // --- 4. Synthesize Final Answer & Prepare Response --- 
@@ -413,40 +398,48 @@ export async function POST(request: NextRequest) {
       // Modify the final response structure to include the main message and retrieved_sources
       return NextResponse.json({
         message: parsedIntentLlmResponse.reply_to_user,
-        details: parsedIntentLlmResponse.intent_context || parsedIntentLlmResponse.data, // Keep existing details structure if any
-        followUpQuestion: parsedIntentLlmResponse.action === 'REQUEST_INFO' ? parsedIntentLlmResponse.reply_to_user : undefined,
-        actionToFulfill: parsedIntentLlmResponse.action === 'FULFILL_INTENT' && parsedIntentLlmResponse.intent === 'DRAFT_EMAIL' ? 
-            { type: 'DRAFT_EMAIL', data: parsedIntentLlmResponse.data || {} } : undefined,
+        details: parsedIntentLlmResponse.data, // Contains original search_query etc.
         retrieved_sources: retrieved_sources_for_client.length > 0 ? retrieved_sources_for_client : undefined
       });
     }
 
     // --- FULFILL OTHER INTENTS (ADD_CONTACT, DRAFT_EMAIL, GET_CONTACT_DETAILS) ---
-    // This block remains largely the same, handling non-search intents
-    if (parsedIntentLlmResponse.action === 'FULFILL_INTENT' && parsedIntentLlmResponse.intent && parsedIntentLlmResponse.data && parsedIntentLlmResponse.intent !== 'SEARCH_USER_DATA') {
-        const intentData = parsedIntentLlmResponse.data;
+    if (parsedIntentLlmResponse.action === 'FULFILL_INTENT' && parsedIntentLlmResponse.intent /* && parsedIntentLlmResponse.intent !== 'SEARCH_USER_DATA' is implicit here */) {
+        // const intentData = parsedIntentLlmResponse.data; // Removed as it's likely unused if cases below use parsedIntentLlmResponse.data directly
         switch (parsedIntentLlmResponse.intent) {
-            case 'ADD_CONTACT': /* ... existing ADD_CONTACT logic ... */ break;
-            case 'DRAFT_EMAIL': /* ... existing DRAFT_EMAIL logic ... */ break;
-            case 'GET_CONTACT_DETAILS': /* ... existing GET_CONTACT_DETAILS logic ... */ break;
+            case 'ADD_CONTACT': 
+              // Presuming existing logic uses parsedIntentLlmResponse.data.name, .email, .phone
+              /* ... existing ADD_CONTACT fulfillment logic ... */ 
+              break;
+            case 'DRAFT_EMAIL': 
+              /* ... existing DRAFT_EMAIL fulfillment logic ... */ 
+              // This intent might primarily pass data to the client via the 'actionToFulfill' field in the main return.
+              break;
+            case 'GET_CONTACT_DETAILS': 
+              /* ... existing GET_CONTACT_DETAILS fulfillment logic ... */ 
+              break;
             default: 
-              console.warn(`[AI Assistant Handler] Unknown FULFILL_INTENT: ${parsedIntentLlmResponse.intent}`);
-              parsedIntentLlmResponse.reply_to_user = "I understood an action, but I'm not sure how to do that yet.";
+              console.warn(`[AI Assistant Handler] Unknown FULFILL_INTENT type in final processing: ${parsedIntentLlmResponse.intent}`);
+              // Ensure reply_to_user is appropriate for an unknown fulfillment
+              if (!parsedIntentLlmResponse.reply_to_user) {
+                  parsedIntentLlmResponse.reply_to_user = "I understood an action, but I'm not sure how to complete it.";
+              }
         }
-        // Return for non-search FULFILL_INTENT
+        // Construct response for these non-search FULFILL_INTENT actions
         return NextResponse.json({
           message: parsedIntentLlmResponse.reply_to_user,
-          details: parsedIntentLlmResponse.data,
+          details: parsedIntentLlmResponse.data, 
           actionToFulfill: { type: parsedIntentLlmResponse.intent, data: parsedIntentLlmResponse.data || {} }
+          // No retrieved_sources for these types of actions
         });
     }
 
-    // --- Handle REQUEST_INFO or GENERAL_REPLY from initial intent LLM (if not search) ---
+    // --- Handle REQUEST_INFO or GENERAL_REPLY from initial intent LLM --- 
+    // This is the fallback if not a FULFILL_INTENT action handled above
     return NextResponse.json({
         message: parsedIntentLlmResponse.reply_to_user || "I'm not sure how to respond to that.",
-        details: parsedIntentLlmResponse.intent_context || parsedIntentLlmResponse.data,
-        followUpQuestion: parsedIntentLlmResponse.action === 'REQUEST_INFO' ? parsedIntentLlmResponse.reply_to_user : undefined,
-        // No actionToFulfill for these general cases usually, DRAFT_EMAIL was handled by FULFILL_INTENT
+        details: parsedIntentLlmResponse.intent_context || parsedIntentLlmResponse.data, // Use intent_context if available for REQUEST_INFO
+        followUpQuestion: parsedIntentLlmResponse.action === 'REQUEST_INFO' ? parsedIntentLlmResponse.reply_to_user : undefined
     });
 
   } catch (error: unknown) {

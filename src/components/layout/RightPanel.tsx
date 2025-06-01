@@ -182,34 +182,39 @@ export function RightPanel() {
           </div>
         ) : (
           chatMessages.map(message => {
-            // Logic to determine primary source and other sources
             let primarySource: RetrievedSourceItem | null = null;
             let otherSources: RetrievedSourceItem[] = [];
-            let identifiedSubjectFromAi: string | null = null;
-
+            
             if (message.role === 'assistant' && message.retrieved_sources && message.retrieved_sources.length > 0) {
-              const subjectHintMatch = message.content.match(/email (?:titled|subject) ['"](.+?)['"]/i);
-              identifiedSubjectFromAi = subjectHintMatch ? subjectHintMatch[1] : null;
+              // Attempt to find the source mentioned by the AI in its textual response
+              const subjectHintMatch = message.content.match(/email (?:titled|subject) ['"]([^'"]+)['"]/i);
+              const identifiedSubjectFromAi = subjectHintMatch ? subjectHintMatch[1].toLowerCase().trim() : null;
 
               if (identifiedSubjectFromAi) {
                 primarySource = message.retrieved_sources.find(
-                  src => src.subject && src.subject.toLowerCase().includes(identifiedSubjectFromAi!.toLowerCase())
-                ) || message.retrieved_sources[0] || null; // Fallback to first if specific subject not found
-              } else {
-                primarySource = message.retrieved_sources[0] || null; // Default to the first source if no subject hint
+                  src => src.subject && src.subject.toLowerCase().trim().includes(identifiedSubjectFromAi)
+                ) || null;
+              }
+
+              // Fallback logic if no exact subject match or no hint found
+              if (!primarySource && message.retrieved_sources.length > 0) {
+                // Prefer the first platform_message if available
+                primarySource = message.retrieved_sources.find(src => src.source_type === 'platform_messages') || message.retrieved_sources[0];
               }
 
               if (primarySource) {
                 otherSources = message.retrieved_sources.filter(src => src.id !== primarySource!.id);
               } else {
-                otherSources = [...message.retrieved_sources]; // Should not happen if primarySource logic is sound
+                 // If somehow primarySource is still null but retrieved_sources exist (e.g. only non-platform messages)
+                otherSources = [...message.retrieved_sources];
               }
             }
+
             return (
               <div 
                 key={message.id} 
                 className={cn(
-                  "p-3 rounded-lg break-words text-sm shadow-sm max-w-[90%] mb-3",
+                  "p-3 rounded-lg break-words text-sm shadow-sm max-w-[90%] mb-3", 
                   message.role === "assistant" 
                     ? "bg-slate-100 text-slate-800 self-start"
                     : "bg-sky-100 text-sky-800 self-end"
