@@ -6,6 +6,7 @@ import { useEffect } from 'react'
 import { Spinner } from '@components/ui/Spinner'
 import { RightPanelProvider } from '@providers/RightPanelProvider'
 import { Toaster } from '@components/ui/sonner'
+import VoiceOrb from '@components/VoiceOrb'
 
 interface ProtectedLayoutProps {
   children: React.ReactNode
@@ -34,6 +35,7 @@ export default function ProtectedLayout({ children }: ProtectedLayoutProps) {
   return (
     <RightPanelProvider>
       {children}
+      <VoiceOrb />
       <Toaster position="top-right" />
     </RightPanelProvider>
   )
