@@ -4,12 +4,14 @@ import { Input } from '@components/ui/input'
 import { Button } from '@components/ui/button'
 import { cn } from '@lib/utils'
 import { useChat } from '@/providers/ChatProvider'
+import { MicrophoneButton } from '@components/MicrophoneButton'
 import { 
   Brain, 
   Sparkles,
   Loader2,
   Mail,
-  Paperclip
+  Paperclip,
+  Volume2
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -211,8 +213,8 @@ export function RightPanel() {
             }
 
             return (
-              <div 
-                key={message.id} 
+              <div
+                key={message.id}
                 className={cn(
                   "p-3 rounded-lg break-words text-sm shadow-sm max-w-[90%] mb-3", 
                   message.role === "assistant" 
@@ -220,7 +222,18 @@ export function RightPanel() {
                     : "bg-sky-100 text-sky-800 self-end"
                 )}
               >
-                <p className="whitespace-pre-wrap">{message.content}</p>
+                <div className="flex items-start gap-2">
+                  <p className="whitespace-pre-wrap flex-1">{message.content}</p>
+                  {message.role === 'assistant' && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => speechSynthesis.speak(new SpeechSynthesisUtterance(message.content))}
+                    >
+                      <Volume2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
                 
                 {primarySource && (
                   <div className="mt-3 pt-3 border-t border-slate-300 space-y-2">
@@ -289,13 +302,14 @@ export function RightPanel() {
       
       <div className="p-3 border-t bg-background">
         <form onSubmit={handleChatSubmit} className="flex gap-2">
-          <Input 
-            value={inputValue} 
-            onChange={(e) => setInputValue(e.target.value)} 
-            placeholder="Ask AI or type your message..." 
+          <Input
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder="Ask AI or type your message..."
             className="flex-1"
             disabled={aiIsResponding}
           />
+          <MicrophoneButton onTranscript={(text) => setInputValue(text)} disabled={aiIsResponding} />
           <Button type="submit" disabled={aiIsResponding || !inputValue.trim()}>Send</Button>
         </form>
       </div>

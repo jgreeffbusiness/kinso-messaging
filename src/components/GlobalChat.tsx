@@ -1,12 +1,13 @@
 'use client'
 
 import { useState } from 'react'
-import { X, ChevronUp, ChevronDown } from 'lucide-react'
+import { X, ChevronUp, ChevronDown, Volume2 } from 'lucide-react'
 import { Button } from '@components/ui/button'
 import { Input } from '@components/ui/input'
 import { ScrollArea } from '@components/ui/scroll-area'
 import { cn } from '@lib/utils'
 import { useChat } from '@providers/ChatProvider'
+import { MicrophoneButton } from '@components/MicrophoneButton'
 
 export function GlobalChat() {
   const { 
@@ -55,14 +56,25 @@ export function GlobalChat() {
         <ScrollArea className="h-full">
           <div className="space-y-4 p-4 pb-14">
             {messages.map(message => (
-              <div 
-                key={message.id} 
+              <div
+                key={message.id}
                 className={cn(
                   "p-3 rounded-lg",
-                  message.sender === "assistant" ? "bg-muted" : "bg-primary text-primary-foreground ml-8"
+                  message.role === "assistant" ? "bg-muted" : "bg-primary text-primary-foreground ml-8"
                 )}
               >
-                <p className="text-sm">{message.content}</p>
+                <div className="flex items-start gap-2">
+                  <p className="text-sm flex-1">{message.content}</p>
+                  {message.role === 'assistant' && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => speechSynthesis.speak(new SpeechSynthesisUtterance(message.content))}
+                    >
+                      <Volume2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -71,20 +83,21 @@ export function GlobalChat() {
       
       <div className="absolute bottom-0 left-0 right-0 p-3 border-t bg-background">
         <div className="flex gap-2">
-          <Input 
-            placeholder="Ask anything..." 
+          <Input
+            placeholder="Ask anything..."
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             className="flex-1"
           />
-          <Button 
-            size="sm" 
+          <MicrophoneButton onTranscript={(text) => setInputValue(text)} />
+          <Button
+            size="sm"
             onClick={() => {
               if (!inputValue.trim()) return;
               
               addMessage({
                 content: inputValue,
-                sender: "user",
+                role: "user",
                 createdAt: new Date().toISOString()
               });
               
