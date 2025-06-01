@@ -2,84 +2,16 @@ import { google, Auth as GoogleAuth } from 'googleapis'
 import { prisma } from '@server/db'
 import type { User } from '@prisma/client'
 import { Prisma } from '@prisma/client'
+import {
+  createOAuth2Client,
+  manuallyRefreshGoogleToken,
+  ensureValidAccessToken,
+} from './gmailAuth'
 // import { getUnifiedMessageService } from '@/lib/services/unified-message-service'
 // import { EmailAdapter } from '@/lib/platforms/adapters/email'
 
-// Create a single function to handle OAuth client creation with auto-refresh capability
-const createOAuth2ClientWithAutoRefresh = (user: User): GoogleAuth.OAuth2Client => {
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
-  )
-  
-  // Set initial credentials
-  oauth2Client.setCredentials({
-    access_token: user.googleAccessToken,
-    refresh_token: user.googleRefreshToken,
-    expiry_date: user.googleTokenExpiry ? new Date(user.googleTokenExpiry).getTime() : undefined
-  })
-  
-  // Add token refresh handler
-  oauth2Client.on('tokens', async (tokens) => {
-    const updateData: Prisma.UserUpdateInput = {
-          googleAccessToken: tokens.access_token,
-          googleTokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined
-        }
-    if (tokens.refresh_token) {
-      updateData.googleRefreshToken = tokens.refresh_token
-    }
-    await prisma.user.update({ where: { id: user.id }, data: updateData })
-    console.log(`Refreshed Google token for user ${user.id}`)
-  })
-  
-  return oauth2Client
-}
-
-// This replaces both your original functions
-export const getOAuth2Client = createOAuth2ClientWithAutoRefresh
-
-// Manual refresh function (for cases where auto-refresh fails)
-export async function manuallyRefreshGoogleToken(user: User): Promise<User> {
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
-  )
-  
-  oauth2Client.setCredentials({
-    refresh_token: user.googleRefreshToken
-  })
-  
-  try {
-    const { credentials } = await oauth2Client.refreshAccessToken()
-    const expiryDate = credentials.expiry_date ? new Date(credentials.expiry_date) : null
-    
-    // Update user in database with new tokens
-    return await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        googleAccessToken: credentials.access_token,
-        googleTokenExpiry: expiryDate
-      }
-    })
-  } catch (error) {
-    console.error('Manual token refresh failed:', error)
-    
-    // Mark user's Google integration as requiring re-authentication
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        googleAccessToken: null,
-        googleRefreshToken: null,
-        googleTokenExpiry: null,
-        googleIntegrations: Prisma.JsonNull
-      }
-    })
-    
-    throw new Error('Google authentication expired. Please reconnect your Google account.')
-  }
-}
+// OAuth client helpers are in gmailAuth.ts
+export { createOAuth2Client as getOAuth2Client, manuallyRefreshGoogleToken } from './gmailAuth'
 
 // Helper type for raw Gmail message data from API
 export interface GmailApiMessageData { 
@@ -176,7 +108,7 @@ export async function syncAllUserEmails(userId: string, since?: Date): Promise<{
   error?: string;
   detailedResults?: Array<{contactId: string, success: boolean, count: number, error?: string}>;
 }> {
-  let user = await prisma.user.findUnique({ 
+  let user = await prisma.user.findUnique({
       where: { id: userId },
     // Select all fields needed by getOAuth2Client and manuallyRefreshGoogleToken
     select: { 
@@ -187,42 +119,18 @@ export async function syncAllUserEmails(userId: string, since?: Date): Promise<{
         contacts: true
     }
   });
-  
+
   if (!user) {
     console.error(`[syncAllUserEmails] User ${userId} not found.`);
     return { success: false, allFetchedGmailMessages: [], error: 'User not found' };
   }
 
-  if (!user.googleAccessToken || !user.googleRefreshToken || (user.googleTokenExpiry && new Date(user.googleTokenExpiry) < new Date())) {
-    if (user.googleRefreshToken) {
-      console.log(`[syncAllUserEmails] Attempting preemptive token refresh for user ${userId}`);
-      try {
-        const refreshedUser = await manuallyRefreshGoogleToken(user);
-        // Re-fetch user with all includes after refresh, especially contacts
-        user = await prisma.user.findUnique({ 
-            where: { id: refreshedUser.id }, 
-            select: { 
-                id: true, email: true, googleAccessToken: true, googleRefreshToken: true, googleTokenExpiry: true,
-                authId: true, authProvider: true, createdAt: true, googleIntegrations: true, 
-                name: true, photoUrl: true, slackAccessToken: true, slackIntegrations: true, 
-                slackRefreshToken: true, slackTeamId: true, slackTokenExpiry: true, slackUserId: true, updatedAt: true,
-                contacts: true
-            }
-        }); 
-        if (!user) throw new Error("User not found after refresh attempt.");
-        console.log(`[syncAllUserEmails] Token refreshed successfully for user ${userId}`);
-      } catch (refreshError: unknown) {
-        const e = refreshError as Error;
-        console.error(`[syncAllUserEmails] Preemptive token refresh failed for user ${userId}: ${e.message}`);
-        return { success: false, allFetchedGmailMessages: [], error: `Google token refresh failed: ${e.message}` };
-      }
-    } else {
-      console.log(`[syncAllUserEmails] Google not fully authenticated for user ${userId} (missing refresh token). Skipping sync.`);
-      return { success: false, allFetchedGmailMessages: [], error: 'Google not fully authenticated (no refresh token).' };
-    }
-  }
-  if (!user.googleAccessToken) { 
-      return { success: false, allFetchedGmailMessages: [], error: 'Google access token still missing after refresh attempt.' };
+  try {
+    user = await ensureValidAccessToken(user);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Google token error';
+    console.error(`[syncAllUserEmails] ${message}`);
+    return { success: false, allFetchedGmailMessages: [], error: message };
   }
 
   const oauth2Client: GoogleAuth.OAuth2Client = getOAuth2Client(user); 
